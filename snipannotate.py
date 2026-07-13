@@ -322,6 +322,14 @@ class App:
         self.root = tk.Tk()
         self.root.title("Snip & Annotate")
         self.root.geometry("1100x750")
+        self.zoom = 1.0                       # v3
+        # v3: ALWAYS shut down cleanly. If the process dies while it still owns
+        # the Windows clipboard (EmptyClipboard makes us the owner), other apps
+        # can be left unable to copy/paste until they restart — which is exactly
+        # what happened after running this tool.
+        self.root.protocol("WM_DELETE_WINDOW", self.on_close)
+        import atexit
+        atexit.register(self._release_clipboard_ownership)
 
         self.monitors = get_monitors()             # v2: multi-monitor support
         names = [m["name"] for m in self.monitors] + ["All screens"]
@@ -370,11 +378,18 @@ class App:
 
     # ---------------- toolbar ----------------
     def _build_toolbar(self):
-        bar = tk.Frame(self.root, bg="#0f172a")
+        # v3: TWO rows. Everything used to sit in one pack(side="left") row, so on
+        # a narrower window the right-hand buttons (Highlight, Save, Copy…) were
+        # simply cut off and you had to maximize to reach them.
+        wrap = tk.Frame(self.root, bg="#0f172a")
+        wrap.pack(fill="x")
+        bar = tk.Frame(wrap, bg="#0f172a")      # row 1: capture + file
         bar.pack(fill="x")
+        bar2 = tk.Frame(wrap, bg="#0f172a")     # row 2: tools + style + actions
+        bar2.pack(fill="x")
 
-        def btn(text, cmd, bg="#334155"):
-            b = tk.Button(bar, text=text, command=cmd, bg=bg, fg="white",
+        def btn(text, cmd, bg="#334155", parent=None):
+            b = tk.Button(parent or bar, text=text, command=cmd, bg=bg, fg="white",
                           activebackground="#475569", activeforeground="white",
                           relief="flat", padx=10, pady=4)
             b.pack(side="left", padx=3, pady=4)
@@ -391,33 +406,40 @@ class App:
         om.pack(side="left", padx=3, pady=4)
         btn("📂 Open…", self.open_file)
 
-        tk.Label(bar, text=" | ", bg="#0f172a", fg="#64748b").pack(side="left")
-
+        # ---- row 2: drawing tools, style, actions ----
         for t, label in (("select", "↖ Select"),
                          ("pen", "✏ Pen"), ("highlight", "🖍 Highlight"),
                          ("line", "─ Line"), ("arrow", "➤ Arrow"),
                          ("rect", "▭ Rect"), ("ellipse", "◯ Ellipse"),
                          ("text", "T Text")):
-            tk.Radiobutton(bar, text=label, value=t, variable=self.tool,
+            tk.Radiobutton(bar2, text=label, value=t, variable=self.tool,
                            indicatoron=False, bg="#334155", fg="white",
                            selectcolor="#0e7c9e", relief="flat",
                            padx=8, pady=4).pack(side="left", padx=2, pady=4)
 
-        tk.Label(bar, text=" | ", bg="#0f172a", fg="#64748b").pack(side="left")
+        tk.Label(bar2, text=" | ", bg="#0f172a", fg="#64748b").pack(side="left")
 
-        self.color_btn = tk.Button(bar, text="Color", bg=self.color, fg="white",
+        self.color_btn = tk.Button(bar2, text="Color", bg=self.color, fg="white",
                                    relief="flat", padx=10, command=self.pick_color)
         self.color_btn.pack(side="left", padx=3)
-        tk.Label(bar, text="Width", bg="#0f172a", fg="#94a3b8").pack(side="left")
-        tk.Spinbox(bar, from_=1, to=30, width=3, textvariable=self.width).pack(side="left", padx=2)
-        tk.Label(bar, text="Font", bg="#0f172a", fg="#94a3b8").pack(side="left")
-        tk.Spinbox(bar, from_=8, to=96, width=3, textvariable=self.font_size).pack(side="left", padx=2)
+        tk.Label(bar2, text="Width", bg="#0f172a", fg="#94a3b8").pack(side="left")
+        tk.Spinbox(bar2, from_=1, to=30, width=3, textvariable=self.width).pack(side="left", padx=2)
+        tk.Label(bar2, text="Font", bg="#0f172a", fg="#94a3b8").pack(side="left")
+        tk.Spinbox(bar2, from_=8, to=96, width=3, textvariable=self.font_size).pack(side="left", padx=2)
 
-        tk.Label(bar, text=" | ", bg="#0f172a", fg="#64748b").pack(side="left")
-        btn("↩ Undo", self.undo)
-        btn("🗑 Clear", self.clear)
-        btn("💾 Save", self.save, "#15803d")
-        btn("📋 Copy", self.copy_clipboard, "#15803d")
+        tk.Label(bar2, text=" | ", bg="#0f172a", fg="#64748b").pack(side="left")
+        btn("↩ Undo", self.undo, parent=bar2)
+        btn("🗑 Clear", self.clear, parent=bar2)
+        btn("💾 Save", self.save, "#15803d", parent=bar2)
+        btn("📋 Copy", self.copy_clipboard, "#15803d", parent=bar2)
+
+        # zoom controls (v3)
+        tk.Label(bar2, text=" | ", bg="#0f172a", fg="#64748b").pack(side="left")
+        btn("＋", self.zoom_in, parent=bar2)
+        btn("－", self.zoom_out, parent=bar2)
+        btn("⤢ Fit", self.zoom_fit, parent=bar2)
+        self.zoom_lbl = tk.Label(bar2, text="100%", bg="#0f172a", fg="#94a3b8", width=6)
+        self.zoom_lbl.pack(side="left")
 
     # ---------------- capture actions ----------------
     def pick_color(self):
@@ -583,15 +605,62 @@ class App:
         if p:
             self.set_image(Image.open(p).convert("RGB"))
 
+    # ---------------- zoom (v3) ----------------
+    def _fit_zoom(self) -> float:
+        """Zoom that makes the whole image visible in the canvas."""
+        if not self.image:
+            return 1.0
+        self.root.update_idletasks()
+        cw = max(self.cv.winfo_width(), 200)
+        ch = max(self.cv.winfo_height(), 200)
+        z = min(cw / self.image.width, ch / self.image.height, 1.0)
+        return max(z, 0.05)
+
+    def _apply_zoom(self, z):
+        self.zoom = max(0.05, min(z, 8.0))
+        if hasattr(self, "zoom_lbl"):
+            self.zoom_lbl.config(text=f"{int(self.zoom * 100)}%")
+        self.redraw()
+
+    def zoom_in(self):  self._apply_zoom(getattr(self, "zoom", 1.0) * 1.25)
+    def zoom_out(self): self._apply_zoom(getattr(self, "zoom", 1.0) / 1.25)
+    def zoom_fit(self): self._apply_zoom(self._fit_zoom())
+    def zoom_100(self): self._apply_zoom(1.0)
+
     def set_image(self, img: Image.Image):
         self.image = img.convert("RGB")
         self.shapes.clear()
-        self.redraw()
+        self.selected = None
+        # v3: like the Microsoft Snipping Tool — after a capture the window comes
+        # forward, sizes itself to the shot, and the image is ZOOMED TO FIT so
+        # every tool is reachable straight away (no maximizing, no scrolling).
+        self._size_window_to(img)
+        self.root.deiconify()
+        self.root.lift()
+        self.root.focus_force()
+        self.root.after(60, self.zoom_fit)
         self.status.config(text=f"Image {img.width}×{img.height} — annotate, then Save or Copy.")
+
+    def _size_window_to(self, img):
+        """Fit the window around the capture, capped to the screen."""
+        try:
+            sw = self.root.winfo_screenwidth()
+            sh = self.root.winfo_screenheight()
+            w = min(img.width + 40, int(sw * 0.9))
+            h = min(img.height + 170, int(sh * 0.9))     # 170 = two toolbars + status
+            w, h = max(w, 900), max(h, 520)
+            x = max((sw - w) // 2, 0)
+            y = max((sh - h) // 3, 0)
+            self.root.geometry(f"{w}x{h}+{x}+{y}")
+        except Exception:
+            pass
 
     # ---------------- drawing ----------------
     def canvas_xy(self, e):
-        return (self.cv.canvasx(e.x), self.cv.canvasy(e.y))
+        """Canvas event -> IMAGE coordinates (undo the zoom, so annotations land
+        on the correct pixels no matter how the view is scaled)."""
+        z = getattr(self, "zoom", 1.0) or 1.0
+        return (self.cv.canvasx(e.x) / z, self.cv.canvasy(e.y) / z)
 
     def _hit_text(self, x, y) -> int | None:
         """Topmost text shape whose bbox contains (x, y), else None."""
@@ -775,9 +844,17 @@ class App:
         self.cv.delete("all")
         if not self.image:
             return
-        self._tkimg = ImageTk.PhotoImage(self.image)
+        z = getattr(self, "zoom", 1.0) or 1.0
+        if abs(z - 1.0) < 0.005:
+            disp = self.image
+        else:
+            w = max(1, int(self.image.width * z))
+            h = max(1, int(self.image.height * z))
+            disp = self.image.resize((w, h), Image.LANCZOS)
+        self._tkimg = ImageTk.PhotoImage(disp)
         self.cv.create_image(0, 0, anchor="nw", image=self._tkimg)
-        self.cv.config(scrollregion=(0, 0, self.image.width, self.image.height))
+        self.cv.config(scrollregion=(0, 0, disp.width, disp.height))
+        self.cv.scale("all", 0, 0, 1, 1)          # no-op; shapes scaled below
         for s in self.shapes:
             self._draw_canvas_shape(s)
         if temp:
@@ -787,6 +864,12 @@ class App:
             if bb:
                 self.cv.create_rectangle(bb[0] - 4, bb[1] - 4, bb[2] + 4, bb[3] + 4,
                                          outline="#00b0ff", dash=(4, 3), width=2)
+        # v3: shapes are stored in IMAGE coordinates; scale the canvas items
+        # (not the image, which is already resized) so they line up when zoomed.
+        if abs(z - 1.0) >= 0.005:
+            for item in self.cv.find_all():
+                if self.cv.type(item) != "image":
+                    self.cv.scale(item, 0, 0, z, z)
 
     # ---------------- export ----------------
     def _pil_font(self, size):
@@ -854,6 +937,46 @@ class App:
         img.save(p, quality=95)
         self.status.config(text=f"Saved: {p}")
 
+    # ---------------- clean shutdown (v3) ----------------
+    def _release_clipboard_ownership(self):
+        """Make sure we are not the clipboard owner when the process exits.
+
+        On Windows, EmptyClipboard() makes the calling process the clipboard
+        OWNER. If that process then exits while still owning it, other apps can
+        be left with a broken copy/paste until they restart. Windows renders any
+        format we already supplied (we always call SetClipboardData with real
+        CF_DIB bytes, never delayed rendering), so simply making sure no session
+        is left open — and that we are not the owner at exit — is enough.
+        """
+        if not IS_WINDOWS:
+            return
+        try:
+            import ctypes
+            u32 = ctypes.windll.user32
+            # If a clipboard session somehow remained open, close it.
+            try:
+                u32.CloseClipboard()
+            except Exception:
+                pass
+            # If we still own the clipboard, hand ownership back by opening with
+            # a NULL owner and closing without emptying it: the data stays, the
+            # ownership is dropped.
+            try:
+                if u32.GetClipboardOwner() == u32.GetActiveWindow():
+                    if u32.OpenClipboard(None):
+                        u32.CloseClipboard()
+            except Exception:
+                pass
+        except Exception:
+            pass
+
+    def on_close(self):
+        self._release_clipboard_ownership()
+        try:
+            self.root.destroy()
+        except Exception:
+            pass
+
     def copy_clipboard(self):
         if not self.image:
             return
@@ -884,10 +1007,22 @@ class App:
                 u32.SetClipboardData.restype = wintypes.HANDLE
                 u32.SetClipboardData.argtypes = [wintypes.UINT, wintypes.HANDLE]
 
-                if not u32.OpenClipboard(None):
-                    time.sleep(0.1)                     # another app may hold it briefly
-                    if not u32.OpenClipboard(None):
-                        raise RuntimeError("clipboard is busy — try again")
+                u32.GetClipboardOwner.restype = wintypes.HWND
+                u32.GetActiveWindow.restype = wintypes.HWND
+                u32.EmptyClipboard.restype = wintypes.BOOL
+                u32.CloseClipboard.restype = wintypes.BOOL
+
+                # v3: retry a few times — another app can hold the clipboard for
+                # a moment, and a failed OpenClipboard used to leave us in a bad
+                # state.
+                opened = False
+                for _ in range(5):
+                    if u32.OpenClipboard(None):
+                        opened = True
+                        break
+                    time.sleep(0.08)
+                if not opened:
+                    raise RuntimeError("clipboard is busy — try again")
                 try:
                     u32.EmptyClipboard()
                     h = k32.GlobalAlloc(GMEM_MOVEABLE, len(data))
