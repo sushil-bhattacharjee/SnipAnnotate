@@ -38,7 +38,7 @@ except ImportError:          # recording is optional; snipping works without it
     cv2 = None
     np = None
 
-__version__ = "9.6"
+__version__ = "9.8"
 
 
 def _install_crash_log():
@@ -171,11 +171,14 @@ def _windows_ocr(img: "Image.Image") -> str:
         result = await engine.recognize_async(bitmap)
         # v9.4: structured output — per-word text + bounding box so the app
         # can overlay selectable text on the picture (Snipping-Tool style).
+        # v9.7: the engine's OWN line grouping is ignored — on column-ish
+        # layouts it emits blocks in segmentation order, shredding the text.
+        # Visual lines are rebuilt geometrically in _ocr_reading_order.
         words = []
-        for li, line in enumerate(result.lines):
+        for line in result.lines:
             for w in line.words:
                 r = w.bounding_rect
-                words.append({"t": w.text, "line": li,
+                words.append({"t": w.text, "line": 0,
                               "x0": r.x, "y0": r.y,
                               "x1": r.x + r.width, "y1": r.y + r.height})
         return words
@@ -192,7 +195,7 @@ def _windows_ocr(img: "Image.Image") -> str:
             for w in words:
                 w["x0"] *= fx; w["x1"] *= fx
                 w["y0"] *= fy; w["y1"] *= fy
-        return words
+        return _ocr_reading_order(words)           # v9.7: visual order
     except ImportError:
         raise
     except Exception as e:
@@ -249,6 +252,49 @@ if IS_WINDOWS:
             ctypes.windll.user32.SetProcessDPIAware()
         except Exception:
             pass
+
+
+def _ocr_reading_order(words: list[dict]) -> list[dict]:
+    """v9.7: rebuild VISUAL reading order from word geometry. Words whose
+    vertical bands overlap by more than half of the smaller height belong to
+    one visual line; lines run top-to-bottom, words left-to-right. This is
+    what fixes the shredded output on layouts the engine splits into blocks
+    (bullets in one block, descriptions in another)."""
+    ws = sorted(words, key=lambda w: (w["y0"] + w["y1"]) / 2)
+    lines: list[dict] = []
+    for w in ws:
+        placed = False
+        for L in lines:
+            ov = min(L["bot"], w["y1"]) - max(L["top"], w["y0"])
+            if ov > 0.5 * min(L["bot"] - L["top"], w["y1"] - w["y0"]):
+                L["items"].append(w)
+                L["top"] = min(L["top"], w["y0"])
+                L["bot"] = max(L["bot"], w["y1"])
+                placed = True
+                break
+        if not placed:
+            lines.append({"top": w["y0"], "bot": w["y1"], "items": [w]})
+    lines.sort(key=lambda L: (L["top"] + L["bot"]) / 2)
+    out = []
+    for li, L in enumerate(lines):
+        L["items"].sort(key=lambda w: w["x0"])
+        for w in L["items"]:
+            w["line"] = li
+            out.append(w)
+    return out
+
+
+def _ocr_join_line(ws: list[dict]) -> str:
+    """v9.7: join one visual line's words, gap-aware — a horizontal gap well
+    below a space's width means the engine split ONE token ('snip _ annotate.
+    py'), so no space is inserted when rejoining."""
+    ws = sorted(ws, key=lambda w: w["x0"])
+    parts = [ws[0]["t"]]
+    for a, b in zip(ws, ws[1:]):
+        gap = b["x0"] - a["x1"]
+        h = max(a["y1"] - a["y0"], b["y1"] - b["y0"], 1)
+        parts.append(("" if gap < 0.18 * h else " ") + b["t"])
+    return "".join(parts)
 
 
 def virtual_origin() -> tuple[int, int]:
@@ -1059,7 +1105,7 @@ class App:
         self.root.bind("<Delete>", lambda e: self._delete_key())
         self.root.bind("<Control-z>", lambda e: self.undo())
         self.root.bind("<Control-s>", lambda e: self.save())
-        self.root.bind("<Control-c>", lambda e: self.copy_clipboard())
+        self.root.bind("<Control-c>", lambda e: self._ctrl_c())
 
         self.status = tk.Label(self.root,
                                text=f"v{__version__}  ·  Snip (region) or Full Screen to start.",
@@ -1220,6 +1266,7 @@ class App:
         sel = RegionSelector(self.root, shot, geom)
         if sel.result:
             self.set_image(sel.result)
+            self._auto_copy_capture()
 
     # ================= v4: capture modes =================
     def snip_window(self):
@@ -1259,6 +1306,7 @@ class App:
         sel = FreeformSelector(self.root, shot, geom)
         if sel.result:
             self.set_image(sel.result)
+            self._auto_copy_capture()
 
     def full_screen(self):
         """v9.3: grab the ENTIRE virtual desktop (all monitors) — same as the
@@ -1272,6 +1320,7 @@ class App:
         finally:
             self.root.deiconify()
         self.set_image(shot)
+        self._auto_copy_capture()
 
     def record_start(self):
         if cv2 is None:
@@ -1804,6 +1853,20 @@ class App:
     def zoom_out(self): self._apply_zoom(getattr(self, "zoom", 1.0) / 1.25)
     def zoom_fit(self): self._apply_zoom(self._fit_zoom())
     def zoom_100(self): self._apply_zoom(1.0)
+
+    def _auto_copy_capture(self):
+        """v9.7: Snipping-Tool default — every CAPTURE goes straight to the
+        clipboard, no button press. Opening a file does NOT auto-copy (that is
+        editing, not capturing); 📋 Copy remains for re-copying after
+        annotating."""
+        if not self.image:
+            return
+        try:
+            self.copy_image_to_clipboard(self.render())
+            self._log(f"AUTOCOPY: {self.image.width}x{self.image.height}")
+            self.status.config(text="Captured and copied to the clipboard.")
+        except Exception as e:
+            self._log(f"AUTOCOPY failed: {e}")
 
     def set_image(self, img: Image.Image, replace: bool = False):
         """v5: every capture ADDS a snip. Nothing is ever silently replaced."""
@@ -2731,6 +2794,12 @@ class App:
         bar = tk.Frame(self.cv, bg="#1e293b")
         tk.Label(bar, text="Text select", bg="#1e293b", fg="#94a3b8",
                  padx=6).pack(side="left")
+        tk.Button(bar, text="📋 Copy selection",
+                  command=lambda: self._ocr_copy(
+                      self._ocr_selection_text(),
+                      f"{len(self.ocr_sel)} word(s)"),
+                  bg="#0369a1", fg="white", relief="flat", padx=10,
+                  pady=2).pack(side="left", padx=4, pady=3)
         tk.Button(bar, text="📋 Copy all", command=self._ocr_copy_all,
                   bg="#15803d", fg="white", relief="flat", padx=10,
                   pady=2).pack(side="left", padx=4, pady=3)
@@ -2793,13 +2862,13 @@ class App:
         return best
 
     def _ocr_all_text(self):
-        """v9.5: the entire recognized text, line by line."""
+        """v9.5: the entire recognized text; v9.7: gap-aware joining."""
         if not self.ocr_words:
             return ""
-        lines = {}
+        lines: dict[int, list] = {}
         for w in self.ocr_words:
-            lines.setdefault(w["line"], []).append(w["t"])
-        return "\n".join(" ".join(lines[k]) for k in sorted(lines))
+            lines.setdefault(w["line"], []).append(w)
+        return "\n".join(_ocr_join_line(lines[k]) for k in sorted(lines))
 
     def _ocr_text_window(self):
         """v9.5: the classic popup — ALL recognized text, editable, with
@@ -2839,31 +2908,85 @@ class App:
                       relief="flat", padx=12, pady=4).pack(side="left", padx=4)
 
     def _ocr_selection_text(self):
-        """Selected words in reading order; same line joined by spaces."""
+        """Selected words in visual reading order; v9.7: gap-aware joining."""
         if not self.ocr_sel:
             return ""
-        idxs = sorted(self.ocr_sel)
-        out, cur_line, cur = [], None, []
-        for i in idxs:
+        by_line: dict[int, list] = {}
+        for i in sorted(self.ocr_sel):
             w = self.ocr_words[i]
-            if w["line"] != cur_line and cur:
-                out.append(" ".join(cur))
-                cur = []
-            cur_line = w["line"]
-            cur.append(w["t"])
-        if cur:
-            out.append(" ".join(cur))
-        return "\n".join(out)
+            by_line.setdefault(w["line"], []).append(w)
+        return "\n".join(_ocr_join_line(by_line[k]) for k in sorted(by_line))
 
-    def _ocr_copy(self, text, what):
-        if not text:
+    def _ctrl_c(self):
+        """v9.8: Ctrl+C in text-select mode with a selection copies the TEXT —
+        it used to fall through to the image copy and clobber the clipboard
+        the instant the user did the most natural thing after selecting."""
+        if self.tool.get() == "ocr" and self.ocr_sel:
+            self._ocr_copy(self._ocr_selection_text(),
+                           f"{len(self.ocr_sel)} word(s)")
             return
+        self.copy_clipboard()
+
+    def _copy_text_native(self, text: str) -> str:
+        """v9.8: text to the WINDOWS clipboard (CF_UNICODETEXT) with the same
+        hardened open/retry/close pattern as the image path. Tk's
+        clipboard_append only announces ownership and was being clobbered by
+        the app's own native clipboard operations. Returns the path used."""
+        if IS_WINDOWS:
+            try:
+                import ctypes
+                from ctypes import wintypes
+                data = text.encode("utf-16-le") + b"\x00\x00"
+                CF_UNICODETEXT, GMEM_MOVEABLE = 13, 0x0002
+                k32, u32 = ctypes.windll.kernel32, ctypes.windll.user32
+                k32.GlobalAlloc.restype = wintypes.HGLOBAL
+                k32.GlobalAlloc.argtypes = [wintypes.UINT, ctypes.c_size_t]
+                k32.GlobalLock.restype = wintypes.LPVOID
+                k32.GlobalLock.argtypes = [wintypes.HGLOBAL]
+                k32.GlobalUnlock.restype = wintypes.BOOL
+                k32.GlobalUnlock.argtypes = [wintypes.HGLOBAL]
+                k32.GlobalFree.argtypes = [wintypes.HGLOBAL]
+                u32.OpenClipboard.argtypes = [wintypes.HWND]
+                u32.SetClipboardData.restype = wintypes.HANDLE
+                u32.SetClipboardData.argtypes = [wintypes.UINT, wintypes.HANDLE]
+                opened = False
+                for _ in range(5):
+                    if u32.OpenClipboard(None):
+                        opened = True
+                        break
+                    time.sleep(0.05)
+                if not opened:
+                    raise OSError("clipboard busy")
+                try:
+                    u32.EmptyClipboard()
+                    h = k32.GlobalAlloc(GMEM_MOVEABLE, len(data))
+                    if not h:
+                        raise OSError("GlobalAlloc failed")
+                    p = k32.GlobalLock(h)
+                    ctypes.memmove(p, data, len(data))
+                    k32.GlobalUnlock(h)
+                    if not u32.SetClipboardData(CF_UNICODETEXT, h):
+                        k32.GlobalFree(h)
+                        raise OSError("SetClipboardData failed")
+                finally:
+                    u32.CloseClipboard()
+                return "win32"
+            except Exception as e:
+                self._log(f"OCR text copy: native failed ({e}), tk fallback")
         try:
             self.root.clipboard_clear()
             self.root.clipboard_append(text)
         except Exception:
             pass
-        self._log(f"OCR copy ({what}): {len(text)} chars")
+        return "tk"
+
+    def _ocr_copy(self, text, what):
+        if not text:
+            self.status.config(text="Nothing selected — drag across some "
+                                    "words first.")
+            return
+        path = self._copy_text_native(text)
+        self._log(f"OCR copy ({what}) via {path}: {len(text)} chars")
         self.status.config(text=f"Copied {what} to the clipboard.")
 
     def _ocr_copy_all(self):
