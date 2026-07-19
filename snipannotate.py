@@ -38,7 +38,7 @@ except ImportError:          # recording is optional; snipping works without it
     cv2 = None
     np = None
 
-__version__ = "9.8"
+__version__ = "9.9"
 
 
 def _install_crash_log():
@@ -295,6 +295,64 @@ def _ocr_join_line(ws: list[dict]) -> str:
         h = max(a["y1"] - a["y0"], b["y1"] - b["y0"], 1)
         parts.append(("" if gap < 0.18 * h else " ") + b["t"])
     return "".join(parts)
+
+
+APP_AUMID = "hiTech.SnipAnnotate"
+
+
+def _apply_app_identity():
+    """v9.9: give the PROCESS its own taskbar identity. Without this, Windows
+    keys the taskbar entry on pythonw.exe's identity, so a pinned shortcut
+    resolves to Python's registered Start-Menu entry (IDLE) and the pin loses
+    the script argument entirely. Must run before the window appears. The
+    Start-Menu shortcut must carry the SAME AppUserModelID (guide §7.2)."""
+    if not IS_WINDOWS:
+        return
+    try:
+        import ctypes
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(APP_AUMID)
+    except Exception:
+        pass
+
+
+def _draw_app_icon() -> "Image.Image":
+    """v9.9: the app icon, drawn in code (no binary in the repo) — dark slate
+    tile, sky-blue snip frame with a green corner handle: hiTech colours."""
+    s = 256
+    img = Image.new("RGBA", (s, s), (0, 0, 0, 0))
+    d = ImageDraw.Draw(img)
+    d.rounded_rectangle((8, 8, s - 8, s - 8), radius=44, fill=(15, 23, 42, 255))
+    # dashed snip frame
+    def dash_h(y, x0, x1):
+        x = x0
+        while x < x1:
+            d.line((x, y, min(x + 18, x1), y), fill=(56, 189, 248, 255), width=12)
+            x += 30
+    def dash_v(x, y0, y1):
+        y = y0
+        while y < y1:
+            d.line((x, y, x, min(y + 18, y1)), fill=(56, 189, 248, 255), width=12)
+            y += 30
+    dash_h(70, 56, 200); dash_h(186, 56, 200)
+    dash_v(56, 70, 186); dash_v(200, 70, 186)
+    # green corner handle (the "grab" dot)
+    d.ellipse((178, 164, 222, 208), fill=(74, 222, 128, 255),
+              outline=(15, 23, 42, 255), width=6)
+    return img
+
+
+def _ensure_icon_file() -> str | None:
+    """v9.9: write snipannotate.ico next to the script on first run so
+    shortcuts (guide §7) can use it. Returns the path or None."""
+    try:
+        ico = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                           "snipannotate.ico")
+        if not os.path.exists(ico):
+            _draw_app_icon().save(ico, sizes=[(16, 16), (24, 24), (32, 32),
+                                              (48, 48), (64, 64), (256, 256)])
+        return ico
+    except Exception:
+        return None
 
 
 def virtual_origin() -> tuple[int, int]:
@@ -1002,8 +1060,18 @@ class FlowBar(tk.Frame):
 
 class App:
     def __init__(self):
+        _apply_app_identity()                 # v9.9: MUST precede tk.Tk()
         self.root = tk.Tk()
         self.root.title(f"Snip & Annotate  ·  hiTech  (v{__version__})")
+        # v9.9: own window icon (title bar + taskbar) + .ico for shortcuts
+        self._icon_path = _ensure_icon_file()
+        try:
+            self._icon_photo = ImageTk.PhotoImage(_draw_app_icon().resize((64, 64)))
+            self.root.iconphoto(True, self._icon_photo)
+            if IS_WINDOWS and self._icon_path:
+                self.root.iconbitmap(default=self._icon_path)
+        except Exception:
+            pass
         self.root.geometry("1100x750")
         self.zoom = 1.0                       # v3
         self.crop_box = None                  # v4
