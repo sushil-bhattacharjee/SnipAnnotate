@@ -1,469 +1,348 @@
-# SnipAnnotate — Install & Run on Windows
+# SnipAnnotate — Installation Guide (v9.9)
 
-A Snipping-Tool-style capture and annotation app: region / full-screen snips,
-pen, highlighter, arrows, shapes, movable text, screen recording, and
-copy-to-clipboard.
+A single-file Windows screen-capture + annotation tool (`snipannotate.py`).
+No installer, no registry — one Python file plus a few pip packages.
 
-**Repository:** <https://github.com/sushil-bhattacharjee/SnipAnnotate>
-
----
-
-## Quick start
-
-Already have Python? Three commands:
-
-```powershell
-git clone https://github.com/sushil-bhattacharjee/SnipAnnotate.git
-cd SnipAnnotate
-python -m venv .venv; .\.venv\Scripts\Activate.ps1; pip install pillow
-python .\snipannotate.py
-```
-
-Then jump to **[Step 5 — Desktop icon & autostart](#5-desktop-icon-start-menu-and-autostart)**.
-
-Everything below is the same thing, explained for someone doing it for the first
-time.
+Repo: https://github.com/sushil-bhattacharjee/SnipAnnotate.git
 
 ---
 
-## 1. Install Python
+## 1. Requirements
 
-1. Download the latest **Windows installer (64-bit)** from
-   <https://www.python.org/downloads/windows/> (Python 3.10 or newer).
-2. On the first screen of the installer, **tick “Add python.exe to PATH”**
-   before clicking *Install Now*. This one checkbox saves a lot of pain.
-
-Open **PowerShell** (`Win` → type `powershell` → Enter) and check:
-
-```powershell
-py --version          # if this fails, try:
-python --version
-```
-
-Either one printing a version (e.g. `Python 3.14.6`) means you are good.
-
-> **Why two commands?** `py` is the *Python launcher*; `python` is whatever is
-> first on your PATH. Depending on how Python was installed, **either one may be
-> missing** — that is normal. Use whichever answers, and use it consistently
-> below. This guide writes `python`; substitute `py` if that is the one that
-> works for you.
-
-<details>
-<summary><b>⚠ “Python was not found; run without arguments to install from the Microsoft Store…”</b> — even though Python IS installed</summary>
-
-Windows 11 ships an **App Execution Alias** that hijacks the name `python` and
-redirects it to the Microsoft Store. Your Python is fine; the name is being
-intercepted.
-
-**Fix it:**
-1. Press `Win`, search **“Manage app execution aliases”**
-   *(Settings → Apps → Advanced app settings → App execution aliases)*
-2. Switch **`python.exe`** and **`python3.exe`** to **Off**
-3. **Close and reopen PowerShell**
-
-**Or simply use `py` instead** — the launcher is never affected by the alias.
-</details>
-
-<details>
-<summary><b>⚠ “The term 'py' is not recognized…”</b></summary>
-
-This machine has no Python launcher (common with a Microsoft Store install).
-Just use **`python`** everywhere instead of `py`. They do the same job.
-</details>
-
----
-
-## 2. Get the code
-
-```powershell
-# Pick any folder you like — this guide uses C:\softwares as the example.
-mkdir C:\softwares -Force
-cd C:\softwares
-
-git clone https://github.com/sushil-bhattacharjee/SnipAnnotate.git
-cd SnipAnnotate
-```
-
-**No git?** Install it from <https://git-scm.com/download/win>, or on the GitHub
-page click **Code → Download ZIP**, extract it, and `cd` into the folder.
-
-> The install path does **not** matter. Every command below works from wherever
-> you put it — nothing is hard-coded.
-
----
-
-## 3. Create a virtual environment
-
-A virtual environment keeps these packages out of your system Python.
-
-```powershell
-python -m venv .venv
-.\.venv\Scripts\Activate.ps1
-```
-
-Your prompt now begins with `(.venv)`.
-
-<details>
-<summary><b>⚠ “Unable to copy … venvwlauncher.exe to … pythonw.exe”</b> — re-creating a venv over an existing install</summary>
-
-**SnipAnnotate is currently running** and is holding `pythonw.exe` open, so
-`venv` cannot overwrite it. If you set up autostart, Windows launched it at
-login — and because it runs without a console window, it is easy to miss.
-
-Close it first:
-
-```powershell
-Get-Process pythonw -ErrorAction SilentlyContinue | Stop-Process -Force
-Start-Sleep 2
-```
-
-Then run the `venv` command again.
-</details>
-
-<details>
-<summary><b>⚠ “Activate.ps1 cannot be loaded because running scripts is disabled on this system”</b></summary>
-
-PowerShell blocks scripts by default. Allow them **for your own user only**:
-
-```powershell
-Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned
-.\.venv\Scripts\Activate.ps1
-```
-
-Answer **`Y`** when prompted. `RemoteSigned` means *“my own local scripts may
-run; anything downloaded from the internet must be signed”* — the standard
-developer setting. It does not affect other users or the machine.
-
-**If company policy forbids changing it,** you do not need to activate at all.
-Use the cmd activator:
-
-```powershell
-.\.venv\Scripts\activate.bat
-```
-
-…or skip activation entirely and call the venv's Python directly — this always
-works, and it is exactly what the shortcut does anyway:
-
-```powershell
-.\.venv\Scripts\python.exe -m pip install pillow
-.\.venv\Scripts\pythonw.exe .\snipannotate.py
-```
-</details>
-
----
-
-## 4. Install the dependencies and run
-
-```powershell
-python -m pip install --upgrade pip
-
-pip install pillow                    # required
-pip install opencv-python numpy       # optional — only for the ⏺ Record button
-```
-
-| Package | Needed for | Required? |
+| What | Version | Why |
 |---|---|---|
-| **pillow** | screen capture, drawing, saving, clipboard | **Yes** — the app exits without it |
-| opencv-python, numpy | the ⏺ **Record** button (MP4 / AVI / GIF) | No — snipping works fine without them |
-| tkinter | the window itself | Ships with Python — nothing to install |
+| Windows | 10 / 11 | capture, clipboard, and OCR use Windows APIs |
+| Python | 3.9+ (3.13 tested) | from python.org — **avoid the Microsoft Store build** |
+| git | any | *optional* — only to clone/pull the repo |
+| Pillow | any current | screenshots, image handling — **required** |
+| opencv-python + numpy | any current | ⏺ screen recording — *optional* |
+| winrt (5 packages) | any current | 🔤 OCR (Windows built-in engine) — *optional* |
 
-Run it:
+tkinter ships with the python.org installer — nothing extra for the UI.
+
+## 2. Install Python (skip if already installed)
+
+Windows has TWO ways to invoke Python, and machines differ in which works:
+
+- `python` — on PATH only if "Add to PATH" was ticked at install time
+- `py` — the **Windows py launcher**, installed by the python.org installer
+  regardless of the PATH choice
+
+They run the same interpreter. **Wherever this guide says `python`, use `py`
+instead if `python` errors or opens the Microsoft Store** — same arguments,
+e.g. `py -m venv .venv`, `py snipannotate.py`. To pick a version explicitly:
+`py -3.13 ...`.
+
+Check what you have:
 
 ```powershell
-python .\snipannotate.py
+python --version
+py --version
 ```
 
-| Button | What it does |
-|---|---|
-| **⬛ New Snip** | dims the screen — drag a rectangle to capture |
-| **🖥 Full Screen** | grabs everything (all monitors) |
-| **⏺ Record** | records the screen *(needs opencv)* |
-| **Screen** | choose which monitor to capture |
-| **📂 Open…** | annotate an existing image file |
-| Pen · Highlight · Line · Arrow · Rect · Ellipse · Text | annotation tools |
-| **💾 Save** (`Ctrl+S`) · **📋 Copy** (`Ctrl+C`) | write a PNG · copy to clipboard |
-| **↩ Undo** (`Ctrl+Z`) · **🗑 Clear** | undo · start over |
-| **＋ － ⤢ Fit** | zoom the view |
+If BOTH fail:
 
-After a capture the window comes forward and the image is zoomed to fit, so every
-tool is reachable immediately.
+1. Download the latest 3.x from https://www.python.org/downloads/windows/
+2. Run the installer → **tick "Add python.exe to PATH"** → Install Now.
+3. Close and reopen the terminal, re-check `python --version`.
 
----
+Store-build warning: the Store Python hides `pythonw.exe` behind an alias and
+breaks the shortcut steps in §7. If `where pythonw` shows a path under
+`WindowsApps`, install from python.org instead.
 
-## 5. Desktop icon, Start-menu entry, and autostart
+## 3. Get the code
 
-Run the block below **once, from inside the SnipAnnotate folder**. It creates all
-three, works no matter where you installed the app, and handles a
-OneDrive-redirected Desktop:
+**Option A — git (recommended, easy updates):**
 
 ```powershell
+# install git if missing (or download from https://git-scm.com/download/win)
+winget install --id Git.Git -e
+
+git clone https://github.com/sushil-bhattacharjee/SnipAnnotate.git C:\Apps\SnipAnnotate
+cd C:\Apps\SnipAnnotate
+# later, to update:  git pull
+```
+
+**Option B — no git:** GitHub → Code → Download ZIP → extract to
+`C:\Apps\SnipAnnotate`.
+
+(Any folder works; the guide uses `C:\Apps\SnipAnnotate` throughout — adjust
+if yours differs.)
+
+## 4. Create a virtual environment (skip if you have one)
+
+Keeps the app's packages out of the system Python:
+
+```powershell
+cd C:\Apps\SnipAnnotate
+python -m venv .venv                 # if python errors: py -m venv .venv
+.\.venv\Scripts\Activate.ps1        # cmd.exe instead: .venv\Scripts\activate.bat
+```
+
+Once the venv is **active** (prompt shows `(.venv)`), plain `python` and
+`pip` always work — the python/py ambiguity only exists outside a venv.
+
+If PowerShell refuses to run the activate script:
+
+```powershell
+Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
+```
+
+Everything below assumes the venv is active (prompt shows `(.venv)`).
+
+## 5. Install the packages
+
+```powershell
+# required
+pip install pillow
+
+# optional: screen recording (MP4/AVI/GIF)
+pip install opencv-python numpy
+
+# optional: OCR / in-picture text selection (copy this whole line)
+pip install winrt-Windows.Foundation winrt-Windows.Foundation.Collections winrt-Windows.Graphics.Imaging winrt-Windows.Media.Ocr winrt-Windows.Storage.Streams
+```
+
+Skipping the optional packages is fine — snipping and annotation work without
+them; the Record and OCR buttons will tell you what's missing if clicked.
+
+## 6. Run
+
+```powershell
+python snipannotate.py       # with console (shows errors — use while testing)
+pythonw snipannotate.py      # no console window (daily use)
+```
+
+`python` not found outside the venv? Use `py snipannotate.py` /
+`pyw snipannotate.py` (the launcher's console-less twin).
+
+With a venv, the no-console interpreter is
+`C:\Apps\SnipAnnotate\.venv\Scripts\pythonw.exe` — that exact path is what the
+shortcuts below must target so the venv's packages are found.
+
+## 7. Make it behave like a real Windows app
+
+Goal: desktop icon, findable in Windows 11 Search, pinnable to the taskbar,
+visible in Task Manager → Startup apps.
+
+### 7.0 Base config (needed by every option below)
+
+The only shared ingredient is the interpreter path and the script path —
+set them once in the PowerShell session, then run whichever option you want:
+
+Run this **from inside the app folder** (the one containing
+`snipannotate.py`) — the path is detected, not typed:
+
+```powershell
+cd <your SnipAnnotate folder>                # e.g. C:\softwares\SnipAnnotate
 $app = (Get-Location).Path
-$exe = "$app\.venv\Scripts\pythonw.exe"
+$pyw = "$app\.venv\Scripts\pythonw.exe"    # no venv? use (Get-Command pythonw.exe).Source
+if (-not (Test-Path $pyw)) { throw "pythonw not found at $pyw - fix before creating shortcuts" }
+$ws  = New-Object -ComObject WScript.Shell
 
-if (-not (Test-Path $exe)) {
-  Write-Warning "pythonw.exe not found — see the troubleshooting box below."
-} else {
-  $desk    = [Environment]::GetFolderPath('Desktop')          # OneDrive-safe
-  $start   = "$env:APPDATA\Microsoft\Windows\Start Menu\Programs"
-  $targets = @(
-    "$desk\SnipAnnotate.lnk",                                  # desktop icon
-    "$start\SnipAnnotate.lnk",                                 # Windows Search / Start
-    "$start\Startup\SnipAnnotate.lnk"                          # launch at login
-  )
-
-  foreach ($lnk in $targets) {
-    $s = (New-Object -ComObject WScript.Shell).CreateShortcut($lnk)
-    $s.TargetPath       = $exe
-    $s.Arguments        = "$app\snipannotate.py"
-    $s.WorkingDirectory = $app
-    $s.Description      = "SnipAnnotate — screen capture and annotation"
-    $s.Save()
-    if (Test-Path $lnk) { Write-Host "OK      $lnk" } else { Write-Warning "FAILED  $lnk" }
-  }
+function New-SnipShortcut($where) {
+    $lnk = $ws.CreateShortcut($where)
+    $lnk.TargetPath       = $pyw
+    $lnk.Arguments        = "`"$app\snipannotate.py`""
+    $lnk.WorkingDirectory = $app
+    if (Test-Path "$app\snipannotate.ico") { $lnk.IconLocation = "$app\snipannotate.ico" }
+    $lnk.Save()
 }
 ```
 
-You now have:
-
-* a **Desktop icon** — double-click to launch
-* an entry in **Windows Search** (`Win` → type *SnipAnnotate*); right-click it to
-  *Pin to Start* or *Pin to taskbar*
-* **automatic launch at every login**
-
-> **Why `pythonw.exe` and not `python.exe`?** They are the same interpreter, but
-> `pythonw` runs **without a black console window**. `python.exe` would drag a
-> useless console along with the app every time.
-
-**Turn off autostart** (the app stays installed):
+v9.9+ writes `snipannotate.ico` next to the script on first run — **run the
+app once before creating shortcuts** so they pick up the proper icon.
 
 ```powershell
-Remove-Item "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\Startup\SnipAnnotate.lnk"
 ```
 
-…or Settings → Apps → **Startup** → toggle it off.
+Options a and b are independent — do either or both.
 
-<details>
-<summary><b>⚠ The script says “pythonw.exe not found”</b></summary>
-
-Some Python installs (notably from the Microsoft Store) create a virtual
-environment without `pythonw.exe`. Check what you actually have:
+### 7.1a Enable W11 Search (Start Menu entry)
 
 ```powershell
-dir .\.venv\Scripts\*.exe
+New-SnipShortcut "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\SnipAnnotate.lnk"
 ```
 
-**Best fix — rebuild the venv with a python.org Python:**
+Press `Win` and type "SnipAnnotate" — it appears like an installed app.
+Remove later by deleting that `.lnk`.
+
+### 7.1b Desktop shortcut
 
 ```powershell
-deactivate
-Remove-Item -Recurse -Force .venv
-python -m venv .venv
-.\.venv\Scripts\Activate.ps1
-pip install pillow
-Test-Path .\.venv\Scripts\pythonw.exe      # must now print True
+New-SnipShortcut "$([Environment]::GetFolderPath('Desktop'))\SnipAnnotate.lnk"
 ```
 
-Then run the shortcut block again.
+Manual alternative (no PowerShell): right-click Desktop → New → Shortcut →
+location `C:\Apps\SnipAnnotate\.venv\Scripts\pythonw.exe "C:\Apps\SnipAnnotate\snipannotate.py"`
+→ name it SnipAnnotate.
 
-**Or accept a console window** — point the shortcut at `python.exe` and start it
-minimised: in the block above, replace the `$exe` line with
+### 7.2 Pin to taskbar (requires v9.9+ and the 7.1a Start-Menu shortcut)
+
+Background: taskbar pins are keyed by an app identity (AppUserModelID).
+`pythonw.exe` has none of its own, so a plain pin collapses onto Python's
+registered entry — that is the "pin opens IDLE" symptom. Two things fix it,
+and both are needed:
+
+1. **The app declares its identity** — v9.9+ does this at startup
+   (`hiTech.SnipAnnotate`). Nothing to do beyond running v9.9 or later.
+2. **The Start-Menu shortcut carries the SAME identity** — one-time stamp:
 
 ```powershell
-$exe = "$app\.venv\Scripts\python.exe"
+$code = @"
+using System;
+using System.Runtime.InteropServices;
+
+namespace SnipPin {
+  [StructLayout(LayoutKind.Sequential, Pack = 4)]
+  public struct PropVariant {
+    public ushort vt; ushort r1; ushort r2; ushort r3;
+    public IntPtr p; int p2;
+    public static PropVariant FromString(string s) {
+      var v = new PropVariant();
+      v.vt = 31; // VT_LPWSTR
+      v.p = Marshal.StringToCoTaskMemUni(s);
+      return v;
+    }
+  }
+
+  [StructLayout(LayoutKind.Sequential)]
+  public struct PropertyKey {
+    public Guid fmtid; public uint pid;
+    public PropertyKey(Guid f, uint p) { fmtid = f; pid = p; }
+  }
+
+  [ComImport, Guid("886D8EEB-8CF2-4446-8D02-CDBA1DBDCF99"),
+   InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+  public interface IPropertyStore {
+    int GetCount(out uint cProps);
+    int GetAt(uint iProp, out PropertyKey pkey);
+    int GetValue(ref PropertyKey key, out PropVariant pv);
+    int SetValue(ref PropertyKey key, ref PropVariant pv);
+    int Commit();
+  }
+
+  [ComImport, Guid("0000010b-0000-0000-C000-000000000046"),
+   InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+  public interface IPersistFile {
+    void GetClassID(out Guid pClassID);
+    [PreserveSig] int IsDirty();
+    void Load([MarshalAs(UnmanagedType.LPWStr)] string pszFileName, uint dwMode);
+    void Save([MarshalAs(UnmanagedType.LPWStr)] string pszFileName,
+              [MarshalAs(UnmanagedType.Bool)] bool fRemember);
+    void SaveCompleted([MarshalAs(UnmanagedType.LPWStr)] string pszFileName);
+    void GetCurFile(out IntPtr ppszFileName);
+  }
+
+  public static class Stamp {
+    public static void SetAumid(string lnk, string aumid) {
+      var t = Type.GetTypeFromCLSID(new Guid("00021401-0000-0000-C000-000000000046"));
+      object link = Activator.CreateInstance(t);
+      ((IPersistFile)link).Load(lnk, 2);
+      var store = (IPropertyStore)link;
+      var key = new PropertyKey(new Guid("9F4C2855-9F79-4B39-A8D0-E1D42DE1D5F3"), 5);
+      var val = PropVariant.FromString(aumid);
+      int hr = store.SetValue(ref key, ref val);
+      if (hr != 0) throw new COMException("SetValue failed", hr);
+      store.Commit();
+      ((IPersistFile)link).Save(lnk, true);
+    }
+  }
+}
+"@
+Add-Type -TypeDefinition $code
+[SnipPin.Stamp]::SetAumid(
+  "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\SnipAnnotate.lnk",
+  "hiTech.SnipAnnotate")
 ```
 
-and add `$s.WindowStyle = 7` before `$s.Save()`.
-</details>
+3. Then pin: `Win` → search SnipAnnotate → right-click → **Pin to taskbar**.
+   The pin now launches SnipAnnotate with its own icon — no IDLE, no
+   grouping under Python.
 
-<details>
-<summary><b>⚠ “Unable to save shortcut … DirectoryNotFoundException” / the Desktop icon never appears</b></summary>
+Re-run the stamp after ever re-creating the Start-Menu shortcut (§7.0's
+function overwrites the property).
 
-Your Desktop is **redirected to OneDrive**, so `C:\Users\<YOU>\Desktop` does not
-exist. The script above already handles this — it asks Windows where the Desktop
-really is:
+### 7.3 Auto-start at logon (Task Manager → Startup apps)
+
+Independent of a/b — uses the same base config from 7.0:
 
 ```powershell
-[Environment]::GetFolderPath('Desktop')
+New-SnipShortcut "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\Startup\SnipAnnotate.lnk"
 ```
 
-If you are creating a shortcut by hand, use whatever *that* prints. Never
-hard-code `$env:USERPROFILE\Desktop`.
-</details>
+Manage (enable/disable) it afterwards in **Task Manager → Startup apps** —
+it's listed there like any application. Manual alternative: `Win+R` →
+`shell:startup` → drop the shortcut in.
 
-<details>
-<summary><b>Prefer to create the shortcut by hand?</b></summary>
-
-1. **Right-click the Desktop → New → Shortcut**
-2. Paste this as the location, replacing the path with your own:
-
-   ```
-   C:\Users\<YOU>\softwares\SnipAnnotate\.venv\Scripts\pythonw.exe C:\Users\<YOU>\softwares\SnipAnnotate\snipannotate.py
-   ```
-
-3. Name it **SnipAnnotate** → Finish
-4. **Right-click it → Properties → Start in:** set to your SnipAnnotate folder
-5. To autostart: press `Win + R`, type **`shell:startup`**, Enter, and **copy the
-   shortcut into that folder**
-</details>
-
-> **Why not a Windows Service?** A service runs with no desktop session, so it
-> cannot show a window or capture the screen. For a GUI tool, *autostart at
-> login* is the correct mechanism — a service would start and be useless.
-
----
-
-## 6. Updating
+## 8. Upgrade
 
 ```powershell
-cd C:\softwares\SnipAnnotate          # ← your folder
-
-# Close the app first if it is running (autostart), or git may fail to
-# overwrite files that are in use:
-Get-Process pythonw -ErrorAction SilentlyContinue | Stop-Process -Force
-
-git pull
-.\.venv\Scripts\Activate.ps1
-pip install --upgrade pillow           # only if the requirements changed
+cd C:\Apps\SnipAnnotate
+git pull            # ZIP users: overwrite snipannotate.py with the new file
 ```
 
-Your shortcuts keep working — they point at the same files.
+Restart the app. State is minimal: the error log lives at
+`%USERPROFILE%\snipannotate_error.log` — attach it when reporting problems
+(every capture, crop, OCR, copy, and failure is logged there since v9.x).
 
----
+## 9. Uninstall (complete removal)
 
-## 7. Troubleshooting
-
-<details>
-<summary><b>“Python was not found… install from the Microsoft Store” (but Python is installed)</b></summary>
-
-Windows 11's **App Execution Alias** is hijacking `python`.
-Settings → Apps → **Advanced app settings → App execution aliases** → switch
-**`python.exe`** and **`python3.exe`** **Off**, then reopen PowerShell.
-Or just use **`py`** — the launcher is never affected.
-</details>
-
-<details>
-<summary><b>“The term 'py' is not recognized”</b></summary>
-
-No Python launcher on this machine (typical of a Store install). Use **`python`**
-instead — same result.
-</details>
-
-<details>
-<summary><b>“Activate.ps1 cannot be loaded because running scripts is disabled”</b></summary>
+Nothing is installed system-wide — no registry entries, no services. Removal
+is: unpin, delete the shortcuts, delete the folder (the `.venv` and all
+packages live inside it), and optionally the log.
 
 ```powershell
-Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned
+# 1. Unpin from taskbar first (right-click the pinned icon → Unpin), then:
+
+# 2. Shortcuts — Start Menu (W11 Search), Desktop, Startup
+Remove-Item -ErrorAction SilentlyContinue `
+  "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\SnipAnnotate.lnk", `
+  "$([Environment]::GetFolderPath('Desktop'))\SnipAnnotate.lnk", `
+  "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\Startup\SnipAnnotate.lnk"
+
+# 3. The app folder — includes .venv, all pip packages, the .ico, the code
+Remove-Item -Recurse -Force 'C:\softwares\SnipAnnotate'   # adjust to your folder
+
+# 4. Optional: the error log
+Remove-Item -ErrorAction SilentlyContinue "$env:USERPROFILE\snipannotate_error.log"
 ```
 
-Answer `Y`, then activate again. Cannot change the policy? Use
-`.\.venv\Scripts\activate.bat`, or skip activation and call
-`.\.venv\Scripts\python.exe` directly.
-</details>
+Notes:
 
-<details>
-<summary><b>“Pillow is required: pip install pillow”, then it exits</b></summary>
+- Deleting the folder removes the virtual environment completely — the venv
+  is just a directory; pip packages installed inside it leave nothing behind.
+- If you installed the winrt/opencv packages **without** a venv (straight into
+  the system Python), remove them from there instead:
+  `pip uninstall pillow opencv-python numpy winrt-Windows.Foundation winrt-Windows.Foundation.Collections winrt-Windows.Graphics.Imaging winrt-Windows.Media.Ocr winrt-Windows.Storage.Streams`
+- Python itself and git are shared tools — uninstall via
+  **Settings → Apps → Installed apps** only if nothing else uses them.
+- A stale pinned taskbar icon after deletion is cosmetic — right-click →
+  Unpin removes it.
 
-The virtual environment is not active, or Pillow went into a different Python.
+## 10. Troubleshooting
 
-```powershell
-.\.venv\Scripts\Activate.ps1
-pip install pillow
-```
-</details>
+| Symptom | Fix |
+|---|---|
+| `python` opens the Microsoft Store / not found | use `py` instead (same args) — or reinstall from python.org with "Add to PATH" |
+| `python` works in one terminal, not another | PATH differs per shell — `py` works everywhere; inside an activated venv `python` always works |
+| Activate.ps1 blocked | `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned` |
+| Shortcut starts but app can't find pillow | shortcut targets system `pythonw.exe`, not the venv's — fix TargetPath (§7.1) |
+| Black console window at logon | shortcut targets `python.exe` — use `pythonw.exe` |
+| "Pillow is required" | `pip install pillow` (inside the venv) |
+| Record button says opencv missing | `pip install opencv-python numpy` |
+| OCR popup about winrt | run the 5-package winrt line (§5), restart the app |
+| OCR crash mentioning async/foundation | old winrt install — reinstall all 5 packages together (they must match) |
+| Pin opens IDLE / generic Python icon | need v9.9+ AND the §7.2 shortcut stamp — both, then re-pin |
+| System-wide copy/paste stops working | fixed in v3+ — update if on v2 |
+| Snip overlay on one monitor only | fixed in v9.2+ — overlay spans all screens |
+| Multiple Pythons installed | run with the explicit one: `py -3.13 snipannotate.py` |
 
-<details>
-<summary><b>“The term '.\.venv\Scripts\pythonnw.exe' is not recognized”</b></summary>
+## 11. Feature ↔ dependency map
 
-Typo — it is **`pythonw.exe`**, with one `n`.
-</details>
-
-<details>
-<summary><b>“can't open file '…\snip_annotate.py'”</b></summary>
-
-The script in this repository is **`snipannotate.py`** — no underscore.
-Run `dir *.py` to confirm the exact name.
-</details>
-
-<details>
-<summary><b>The ⏺ Record button does nothing</b></summary>
-
-Recording is optional and needs OpenCV:
-
-```powershell
-pip install opencv-python numpy
-```
-</details>
-
-<details>
-<summary><b>Snips are blurry, or the drag rectangle lands in the wrong place</b></summary>
-
-A display-scaling (DPI) issue. The app sets per-monitor DPI awareness on Windows;
-if it persists, right-click `pythonw.exe` → **Properties → Compatibility →
-Change high DPI settings → Override high DPI scaling behaviour → Application**.
-</details>
-
-<details>
-<summary><b>“Access to the path … is denied” when deleting or re-installing</b></summary>
-
-The app is **running** — almost certainly started automatically at login. A
-running `pythonw.exe` holds its own executable plus `PIL`, `numpy` and `cv2`
-open, so those files cannot be deleted or overwritten.
-
-```powershell
-Get-Process pythonw -ErrorAction SilentlyContinue | Stop-Process -Force
-Start-Sleep 2
-```
-
-Then retry. (If it persists, close the SnipAnnotate window from the taskbar, or
-Task Manager → **pythonw.exe** → *End task*.)
-</details>
-
-<details>
-<summary><b>Double-clicking the shortcut does nothing</b></summary>
-
-The target probably points at a file that is not there. Check it:
-
-```powershell
-$s = (New-Object -ComObject WScript.Shell).CreateShortcut(
-       [Environment]::GetFolderPath('Desktop') + '\SnipAnnotate.lnk')
-$s.TargetPath
-Test-Path $s.TargetPath        # must print True
-```
-
-If it prints `False`, re-run the shortcut block in Step 5 from inside the
-SnipAnnotate folder.
-</details>
-
----
-
-## 8. Uninstall
-
-Edit the **first line** to your install folder, then run the whole block:
-
-```powershell
-$app = "C:\softwares\SnipAnnotate"          # ← your folder
-
-# 1. Stop the app. It is almost certainly running (autostart), and a running
-#    pythonw.exe locks its own files — deletion fails with "Access denied".
-Get-Process pythonw -ErrorAction SilentlyContinue | Stop-Process -Force
-Start-Sleep 2
-
-# 2. Remove the shortcuts
-$start = "$env:APPDATA\Microsoft\Windows\Start Menu\Programs"
-Remove-Item "$start\Startup\SnipAnnotate.lnk" -ErrorAction SilentlyContinue
-Remove-Item "$start\SnipAnnotate.lnk"         -ErrorAction SilentlyContinue
-Remove-Item ([Environment]::GetFolderPath('Desktop') + '\SnipAnnotate.lnk') -ErrorAction SilentlyContinue
-
-# 3. Remove the app (step out of the folder first — you cannot delete the
-#    directory you are standing in)
-cd (Split-Path $app)
-Remove-Item -Recurse -Force $app
-
-Test-Path $app        # must print False
-```
-
-Nothing is written outside that folder and those three shortcuts.
-
-> `Stop-Process` is not optional. Skip it and you get a wall of *“Access to the
-> path … is denied”* for `pythonw.exe`, `PIL`, `numpy` and `cv2` — every file the
-> running app has open.
+| Feature | Needs |
+|---|---|
+| Snip / Freeform / Full Screen / annotate / layers / crop / trim | pillow only |
+| Copy image + auto-copy on capture | pillow only (native Win32 clipboard) |
+| 🔤 OCR + in-picture text selection | the 5 winrt packages |
+| ⏺ Record (MP4/AVI/GIF) | opencv-python + numpy |
