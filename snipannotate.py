@@ -38,7 +38,7 @@ except ImportError:          # recording is optional; snipping works without it
     cv2 = None
     np = None
 
-__version__ = "9.9"
+__version__ = "9.10"
 
 
 def _install_crash_log():
@@ -1560,7 +1560,12 @@ class App:
         self._thumb_imgs = []                      # keep refs alive
 
         for i, snip in enumerate(self.snips):
-            im = snip["image"].copy()
+            # v9.10: composed pages / annotated snips show their REAL content
+            # (the raw base of a page is just white)
+            if snip.get("layers") or snip.get("shapes"):
+                im = self.render_snip(snip)
+            else:
+                im = snip["image"].copy()
             im.thumbnail((96, 96))
             tkim = ImageTk.PhotoImage(im)
             self._thumb_imgs.append(tkim)
@@ -1688,6 +1693,8 @@ class App:
             x = self.image.width + 12
             y = 12
 
+        self._log(f"LAYER drop: src={src['name']!r} src_layers="
+                  f"{len(src.get('layers') or [])} -> page has {len(self.layers)}")
         self.layers.append({"orig": img, "img": img, "x": x, "y": y,
                             "w": img.width, "h": img.height, "name": src["name"]})
         self.layer_sel = len(self.layers) - 1
@@ -2667,13 +2674,19 @@ class App:
         return ImageFont.load_default()
 
     def render_snip(self, snip: dict) -> Image.Image:
-        """v5: bake a SPECIFIC snip's annotations into its image (used by Compose)."""
-        keep_img, keep_shapes = self.image, self.shapes
+        """v5: bake a SPECIFIC snip's annotations into its image.
+        v9.10: swap LAYERS too — render() composites self.layers since v8, so
+        leaving the CURRENT page's layers in place baked them into every
+        dropped snip (drag snip 3 onto a 1+2 page -> the "snip 3" layer showed
+        the 1+2 composite). The source snip's OWN layers now bake correctly."""
+        keep_img, keep_shapes, keep_layers = self.image, self.shapes, self.layers
         try:
-            self.image, self.shapes = snip["image"], snip["shapes"]
+            self.image = snip["image"]
+            self.shapes = snip["shapes"]
+            self.layers = snip.get("layers", [])
             return self.render()
         finally:
-            self.image, self.shapes = keep_img, keep_shapes
+            self.image, self.shapes, self.layers = keep_img, keep_shapes, keep_layers
 
     def render(self) -> Image.Image:
         """Burn LAYERS, then annotations, into a copy of the base image."""
