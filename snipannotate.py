@@ -40,7 +40,7 @@ except ImportError:          # recording is optional; snipping works without it
     cv2 = None
     np = None
 
-__version__ = "9.11.4"
+__version__ = "9.11.5"
 
 
 def _install_crash_log():
@@ -1002,9 +1002,13 @@ class Recorder:
         """v6: a red outline around the area being recorded — you could not see
         WHAT was being captured before."""
         try:
-            x = self.bbox[0] + self.vx
-            y = self.bbox[1] + self.vy
-            w, h = self.size
+            # v9.11.5: the rim goes just OUTSIDE the recorded area. It used to sit
+            # exactly on it, so its 3 px were captured into every frame (a red line
+            # round the video). RIM px wide, GAP px clear of the area.
+            RIM, GAP = 3, 2
+            x = self.bbox[0] + self.vx - RIM - GAP
+            y = self.bbox[1] + self.vy - RIM - GAP
+            w, h = self.size[0] + 2 * (RIM + GAP), self.size[1] + 2 * (RIM + GAP)
             self.border = tk.Toplevel(self.app.root)
             self.border.overrideredirect(True)
             self.border.attributes("-topmost", True)
@@ -1013,7 +1017,8 @@ class Recorder:
             self.border.configure(bg="#ef4444")
             # punch a hole: an inner frame the colour of nothing -> only the rim shows
             inner = tk.Frame(self.border, bg="#ef4444")
-            inner.pack(fill="both", expand=True, padx=3, pady=3)
+            inner.pack(fill="both", expand=True, padx=RIM, pady=RIM)
+            self._exclude_from_capture(self.border)
             try:                                    # click-through, and don't record it
                 self.border.attributes("-transparentcolor", "#000001")
                 inner.configure(bg="#000001")
@@ -1021,6 +1026,22 @@ class Recorder:
                 pass
         except Exception:
             self.border = None
+
+    @staticmethod
+    def _exclude_from_capture(win):
+        """v9.11.5: Windows 10 2004+ can keep a window out of screen captures
+        (WDA_EXCLUDEFROMCAPTURE): the rim and the bar never appear in a recording,
+        even when the area touches them. Older Windows: ignored (the rim is outside
+        the area anyway)."""
+        if not IS_WINDOWS:
+            return
+        try:
+            import ctypes
+            win.update_idletasks()
+            hwnd = int(win.wm_frame(), 16)
+            ctypes.windll.user32.SetWindowDisplayAffinity(hwnd, 0x11)
+        except Exception:
+            pass
 
     # small floating control bar, placed just above the recorded area
     def _build_bar(self):
@@ -1032,6 +1053,7 @@ class Recorder:
         bx = self.bbox[0] + self.vx
         by = max(self.bbox[1] + self.vy - 44, 0)
         self.bar.geometry(f"+{bx}+{by}")
+        self._exclude_from_capture(self.bar)           # v9.11.5: never in the video
         self.rec_lbl = tk.Label(self.bar, text="● READY", fg="#fbbf24", bg="#111827",
                                 font=("Segoe UI", 11, "bold"))
         self.rec_lbl.pack(side="left", padx=(10, 4), pady=6)
