@@ -18,6 +18,7 @@ from __future__ import annotations
 import io
 import os
 import platform
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -38,7 +39,7 @@ except ImportError:          # recording is optional; snipping works without it
     cv2 = None
     np = None
 
-__version__ = "9.10"
+__version__ = "9.11"
 
 
 def _install_crash_log():
@@ -696,8 +697,131 @@ class FreeformSelector:
         self.top.destroy()
 
 
+def _audio_available() -> bool:
+    """v9.11: sound recording needs `soundcard` (mic + PC sound, Windows WASAPI)."""
+    import importlib.util
+    return np is not None and importlib.util.find_spec("soundcard") is not None
+
+
+def _ffmpeg_exe():
+    """v9.11: ffmpeg joins sound + video. `pip install imageio-ffmpeg` brings its own copy."""
+    try:
+        import imageio_ffmpeg
+        return imageio_ffmpeg.get_ffmpeg_exe()
+    except Exception:
+        return shutil.which("ffmpeg")
+
+
+class AudioRecorder:
+    """v9.11: records the microphone and/or what the PC plays (WASAPI loopback),
+    each in its own thread, while the Recorder captures the screen. Like the
+    Windows Snipping Tool's 🎤 and 🔊 buttons.
+
+    Every 0.1 s block is stored with the time it arrived and placed on a timeline
+    that starts at the video's first frame, so sound and picture stay in step even
+    if a device starts late or pauses (silence fills any gap)."""
+
+    RATE = 48000
+    BLOCK = RATE // 10                                  # 0.1 s
+
+    def __init__(self, mic: bool, system: bool):
+        import threading
+        self.sources = [s for s, on in (("mic", mic), ("system", system)) if on]
+        self.stop_flag = threading.Event()
+        self.chunks = {s: [] for s in self.sources}     # source -> [(arrival time, frames x ch)]
+        self.errors = {}                                # source -> message
+        self.threads = [threading.Thread(target=self._run, args=(s,), daemon=True)
+                        for s in self.sources]
+        self.t0 = time.time()
+
+    def start(self, t0: float):
+        self.t0 = t0
+        for t in self.threads:
+            t.start()
+
+    def _run(self, source: str):
+        try:
+            if IS_WINDOWS:                              # COM for THIS thread only: importing
+                import ctypes                           # soundcard in the Tk thread would turn
+                ctypes.windll.ole32.CoInitializeEx(None, 0)   # it MTA and upset file dialogs
+            import soundcard as sc
+            if source == "mic":
+                dev = sc.default_microphone()
+            else:                                       # "what you hear" from the default speaker
+                dev = sc.get_microphone(id=str(sc.default_speaker().name), include_loopback=True)
+            with dev.recorder(samplerate=self.RATE) as rec:
+                while not self.stop_flag.is_set():
+                    data = rec.record(numframes=self.BLOCK)
+                    self.chunks[source].append((time.time(), data))
+        except Exception as e:
+            self.errors[source] = f"{type(e).__name__}: {e}"
+
+    def stop(self):
+        self.stop_flag.set()
+        for t in self.threads:
+            t.join(timeout=3)
+
+    def write_wavs(self, seconds: float) -> list:
+        """One 16-bit stereo WAV per source that recorded something, `seconds` long
+        (the video's length). Returns their paths."""
+        import wave
+        out = []
+        total = max(1, int(seconds * self.RATE))
+        for source in self.sources:
+            parts = self.chunks.get(source) or []
+            if not parts:
+                continue
+            track = np.zeros((total, 2), dtype=np.float32)
+            for arrived, data in parts:
+                if data.ndim == 1:
+                    data = data[:, None]
+                data = np.repeat(data, 2, axis=1) if data.shape[1] == 1 else data[:, :2]
+                end = int((arrived - self.t0) * self.RATE)      # this block ended about now
+                start = end - len(data)
+                a, b = max(start, 0), min(end, total)
+                if b > a:
+                    track[a:b] = data[a - start:b - start]
+            pcm = (np.clip(track, -1.0, 1.0) * 32767).astype("<i2")
+            path = os.path.join(tempfile.gettempdir(), f"snip_rec_{int(self.t0)}_{source}.wav")
+            with wave.open(path, "wb") as w:
+                w.setnchannels(2)
+                w.setsampwidth(2)
+                w.setframerate(self.RATE)
+                w.writeframes(pcm.tobytes())
+            out.append(path)
+        return out
+
+
+def mux_video(video: str, wavs: list, dst: str):
+    """v9.11: video + 0..2 WAVs -> dst with ffmpeg. MP4: H.264 + AAC (plays everywhere,
+    and far smaller than OpenCV's mp4v). AVI: MPEG-4 + PCM. Two sources are mixed."""
+    ff = _ffmpeg_exe()
+    if not ff:
+        raise RuntimeError("ffmpeg not found:  pip install imageio-ffmpeg")
+    cmd = [ff, "-y", "-loglevel", "error", "-i", video]
+    for w in wavs:
+        cmd += ["-i", w]
+    if len(wavs) == 2:
+        cmd += ["-filter_complex", "[1:a][2:a]amix=inputs=2:duration=longest:normalize=0[a]",
+                "-map", "0:v", "-map", "[a]"]
+    elif wavs:
+        cmd += ["-map", "0:v", "-map", "1:a"]
+    if dst.lower().endswith(".avi"):
+        cmd += ["-c:v", "mpeg4", "-q:v", "3", "-c:a", "pcm_s16le"]
+    else:
+        cmd += ["-c:v", "libx264", "-preset", "veryfast", "-crf", "23", "-pix_fmt", "yuv420p",
+                "-movflags", "+faststart", "-c:a", "aac", "-b:a", "160k"]
+    cmd.append(dst)
+    flags = 0x08000000 if IS_WINDOWS else 0            # CREATE_NO_WINDOW: no console flash
+    r = subprocess.run(cmd, capture_output=True, text=True, creationflags=flags)
+    if r.returncode != 0:
+        raise RuntimeError("ffmpeg failed: " + (r.stderr.strip().splitlines() or ["?"])[-1])
+
+
 class Recorder:
-    """Threaded screen recorder -> temp MP4; converted at save time if needed."""
+    """Threaded screen recorder -> temp MP4; converted at save time if needed.
+    v9.11: with 🎤 / 🔊 on, an AudioRecorder runs alongside and the sound is joined
+    to the video when you save."""
 
     FPS = 12
 
@@ -737,6 +861,9 @@ class Recorder:
                         "Try:  pip install --upgrade opencv-python")
             raise RuntimeError(self.err)
 
+        self.audio = None                           # v9.11: AudioRecorder while recording
+        self.wavs = []
+        self.audio_note = ""
         self.frames = 0
         self.errors = 0
         self.last_error = ""
@@ -761,6 +888,7 @@ class Recorder:
             return
         self.running = True
         self.t0 = time.time()
+        self._start_audio()                        # v9.11
         self.timer.config(fg="#e5e7eb")
         if hasattr(self, "start_btn"):
             self.start_btn.pack_forget()
@@ -770,6 +898,20 @@ class Recorder:
         self.thread.start()
         self._tick()
 
+    def _start_audio(self):
+        """v9.11: start 🎤 / 🔊 recording at the same moment as the first frame."""
+        mic, system = self.app.rec_mic.get(), self.app.rec_sys.get()
+        for cb in getattr(self, "audio_boxes", []):
+            cb.config(state="disabled")             # fixed once recording starts
+        if not (mic or system):
+            return
+        if not _audio_available():
+            self.audio_note = ("Recorded WITHOUT sound: the soundcard package is missing.\n"
+                               "Install it once:  pip install soundcard imageio-ffmpeg")
+            return
+        self.audio = AudioRecorder(mic, system)
+        self.audio.start(self.t0)
+
     def cancel(self):
         """v7: abandon an armed (not yet started) recording."""
         self.stop_flag.set()
@@ -778,6 +920,8 @@ class Recorder:
             os.remove(self.tmp)
         except Exception:
             pass
+        if self.audio:                             # v9.11
+            self.audio.stop()
         for w in ("bar", "border"):
             x = getattr(self, w, None)
             if x:
@@ -829,6 +973,16 @@ class Recorder:
         self.timer = tk.Label(self.bar, text="0:00", fg="#e5e7eb", bg="#111827",
                               font=("Consolas", 11))
         self.timer.pack(side="left", padx=4)
+
+        # v9.11: sound, like the Snipping Tool: 🎤 your voice, 🔊 what the PC plays
+        self.audio_boxes = []
+        for var, text, tip in ((self.app.rec_mic, "🎤 Mic", "Record your microphone"),
+                               (self.app.rec_sys, "🔊 PC sound", "Record what the PC plays")):
+            cb = tk.Checkbutton(self.bar, text=text, variable=var, bg="#111827", fg="#e5e7eb",
+                                selectcolor="#334155", activebackground="#111827",
+                                activeforeground="white", font=("Segoe UI", 10))
+            cb.pack(side="left", padx=(6, 0), pady=4)
+            self.audio_boxes.append(cb)
 
         # v7: ▶ Start (armed) → ⏹ Stop (running)
         self.start_btn = tk.Button(self.bar, text="▶ Start", command=self.begin,
@@ -892,8 +1046,13 @@ class Recorder:
                     frame = cv2.resize(frame, self.size)
                 if self.frames < 5 and not frame.any():   # v6.1: pure-black frame
                     self.black += 1
-                self.writer.write(frame)
-                self.frames += 1
+                # v9.11: write as many frames as real time asks for. A slow grab used to
+                # DROP frames, so the video ran shorter (and faster) than real time:
+                # harmless when silent, but the sound would drift out of step.
+                due = int((time.time() - self.t0) * self.FPS) + 1
+                for _ in range(max(1, due - self.frames)):
+                    self.writer.write(frame)
+                    self.frames += 1
             except Exception as e:                 # v6: was `pass` — silent death
                 self.errors += 1
                 self.last_error = f"{type(e).__name__}: {e}"
@@ -912,6 +1071,16 @@ class Recorder:
         if self.thread:
             self.thread.join(timeout=5)
         self.writer.release()
+        if self.audio:                             # v9.11: sound, as long as the video
+            self.audio.stop()
+            try:
+                self.wavs = self.audio.write_wavs(self.frames / self.FPS)
+            except Exception as e:
+                self.wavs = []
+                self.audio.errors["write"] = f"{type(e).__name__}: {e}"
+            if self.audio.errors:
+                self.audio_note = "Sound problem: " + "; ".join(
+                    f"{k}: {v}" for k, v in self.audio.errors.items())
         self.bar.destroy()
         if getattr(self, "border", None):          # v6
             try:
@@ -948,7 +1117,7 @@ class Recorder:
             self.app.status.config(
                 text=f"Recorded {self.frames} frame(s); {self.errors} frame(s) failed "
                      f"({self.last_error}).")
-        self.app.recording_done(self.tmp, self.frames, self.size)
+        self.app.recording_done(self.tmp, self.frames, self.size, self.wavs, self.audio_note)
 
 
 
@@ -1126,6 +1295,8 @@ class App:
                                             self.tool.get() != "ocr") else None))
         self.selected: int | None = None           # index into self.shapes (text only)
         self.recorder = None                       # active Recorder or None
+        self.rec_mic = tk.BooleanVar(value=True)   # v9.11: 🎤 on by default
+        self.rec_sys = tk.BooleanVar(value=False)  # v9.11: 🔊 PC sound off by default
         self._move_from = None                     # drag-move origin
         self.color = "#ff2d2d"
         self.width = tk.IntVar(value=3)
@@ -1439,10 +1610,20 @@ class App:
         self.status.config(
             text=f"Armed {bw}×{bh} — press ▶ Start on the floating bar when ready.")
 
-    def recording_done(self, tmp_path: str, frames: int, size: tuple):
+    def recording_done(self, tmp_path: str, frames: int, size: tuple,
+                       wavs: list = (), audio_note: str = ""):
         self.recorder = None
         self.root.deiconify()
+
+        def tidy(*paths):
+            for x in paths:
+                try:
+                    os.remove(x)
+                except Exception:
+                    pass
+
         if frames == 0:
+            tidy(*wavs)
             messagebox.showerror("Recording", "No frames were captured.")
             return
         secs = frames / Recorder.FPS
@@ -1450,26 +1631,56 @@ class App:
             defaultextension=".mp4",
             initialfile=time.strftime("recording_%Y%m%d_%H%M%S.mp4"),
             filetypes=[("MP4 video", "*.mp4"), ("AVI video", "*.avi"),
-                       ("Animated GIF", "*.gif")])
+                       ("Animated GIF (no sound)", "*.gif")])
         if not p:
-            os.unlink(tmp_path)
+            tidy(tmp_path, *wavs)
             self.status.config(text="Recording discarded.")
             return
+        ext = os.path.splitext(p)[1].lower()
+        notes = [audio_note] if audio_note else []
         try:
-            ext = os.path.splitext(p)[1].lower()
-            if ext == ".mp4":
-                os.replace(tmp_path, p)
-            elif ext == ".avi":
-                self._transcode(tmp_path, p, "XVID")
-                os.unlink(tmp_path)
-            elif ext == ".gif":
+            if ext == ".gif":
                 self._to_gif(tmp_path, p)
-                os.unlink(tmp_path)
+                if wavs:
+                    notes.append("GIF has no sound: save as MP4 to keep it.")
+            elif ext in (".mp4", ".avi") and _ffmpeg_exe():
+                # v9.11: one ffmpeg pass joins the sound and re-encodes (H.264 for MP4).
+                # Written next to tmp first, then MOVED: os.replace cannot cross drives.
+                out = os.path.splitext(tmp_path)[0] + "_final" + ext
+                try:
+                    mux_video(tmp_path, list(wavs), out)
+                    shutil.move(out, p)
+                except Exception as e:                     # fall back: silent video + WAV
+                    tidy(out)
+                    self._save_silent(tmp_path, p, ext)
+                    notes.append(f"Could not add the sound ({e}).")
+                    for w in wavs:
+                        keep = os.path.splitext(p)[0] + "_" + w.rsplit("_", 1)[-1]
+                        shutil.copy(w, keep)
+                        notes.append(f"Sound kept as {keep}")
             else:
-                os.replace(tmp_path, p)
-            self.status.config(text=f"Saved {secs:.0f}s recording: {p}")
+                self._save_silent(tmp_path, p, ext)
+                if wavs:                                   # no ffmpeg: keep the sound next to it
+                    for w in wavs:
+                        keep = os.path.splitext(p)[0] + "_" + w.rsplit("_", 1)[-1]
+                        shutil.copy(w, keep)
+                        notes.append(f"Sound saved separately as {keep}")
+                    notes.append("To get one file with sound:  pip install imageio-ffmpeg")
+            tidy(tmp_path, *wavs)
+            sound = " with sound" if (wavs and ext != ".gif" and not any(n.startswith("Could not") for n in notes)) else ""
+            self.status.config(text=f"Saved {secs:.0f}s recording{sound}: {p}")
+            if notes:
+                messagebox.showinfo("Recording saved", "\n\n".join(notes))
         except Exception as e:
-            messagebox.showerror("Save failed", str(e))
+            messagebox.showerror("Save failed",
+                                 f"{e}\n\nThe recording is still here:\n{tmp_path}")
+
+    def _save_silent(self, tmp_path: str, p: str, ext: str):
+        """The pre-9.11 path, without sound. shutil.move also works across drives."""
+        if ext == ".avi" and not tmp_path.lower().endswith(".avi"):
+            self._transcode(tmp_path, p, "XVID")
+        else:
+            shutil.copy(tmp_path, p)
 
     @staticmethod
     def _transcode(src_path: str, dst: str, fourcc: str):

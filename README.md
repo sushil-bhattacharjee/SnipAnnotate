@@ -1,4 +1,4 @@
-# SnipAnnotate — Installation Guide (v9.9)
+# SnipAnnotate — Installation Guide (v9.11)
 
 A single-file Windows screen-capture + annotation tool (`snipannotate.py`).
 No installer, no registry — one Python file plus a few pip packages.
@@ -16,6 +16,7 @@ Repo: https://github.com/sushil-bhattacharjee/SnipAnnotate.git
 | git | any | *optional* — only to clone/pull the repo |
 | Pillow | any current | screenshots, image handling — **required** |
 | opencv-python + numpy | any current | ⏺ screen recording — *optional* |
+| soundcard + imageio-ffmpeg | any current | 🎤 / 🔊 sound in recordings (v9.11) — *optional* |
 | winrt (5 packages) | any current | 🔤 OCR (Windows built-in engine) — *optional* |
 
 tkinter ships with the python.org installer — nothing extra for the UI.
@@ -99,12 +100,29 @@ pip install pillow
 # optional: screen recording (MP4/AVI/GIF)
 pip install opencv-python numpy
 
+# optional: sound in recordings, your mic and/or PC sound (v9.11)
+pip install soundcard imageio-ffmpeg
+
 # optional: OCR / in-picture text selection (copy this whole line)
 pip install winrt-Windows.Foundation winrt-Windows.Foundation.Collections winrt-Windows.Graphics.Imaging winrt-Windows.Media.Ocr winrt-Windows.Storage.Streams
 ```
 
 Skipping the optional packages is fine — snipping and annotation work without
 them; the Record and OCR buttons will tell you what's missing if clicked.
+
+### Recording with sound (v9.11)
+
+Like the Windows Snipping Tool: ⏺ → drag the area → on the bar above it tick
+**🎤 Mic** (your voice, on by default) and/or **🔊 PC sound** (what the PC plays),
+then **▶ Start**. When you stop and save as **MP4** (or AVI), sound and video are
+one file. GIF has no sound.
+
+- Windows must allow the microphone: *Settings → Privacy & security → Microphone →
+  Let desktop apps access your microphone*.
+- Without `imageio-ffmpeg` the video is saved silent and the sound next to it as a
+  `.wav`; without `soundcard` it records silently and tells you what to install.
+- Recordings can now be saved to any drive (before v9.11 a save to another drive
+  failed and left the file in `%TEMP%` as `snip_rec_*.mp4`).
 
 ## 6. Run
 
