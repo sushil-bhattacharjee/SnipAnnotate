@@ -40,7 +40,7 @@ except ImportError:          # recording is optional; snipping works without it
     cv2 = None
     np = None
 
-__version__ = "9.11.3"
+__version__ = "9.11.4"
 
 
 def _install_crash_log():
@@ -744,7 +744,7 @@ try:
         chunks.append((time.time(), data))
         return (None, pyaudio.paContinue)
     stream = pa.open(format=pyaudio.paInt16, channels=ch, rate=rate, input=True,
-                     input_device_index=dev["index"], frames_per_buffer=rate // 20,
+                     input_device_index=dev["index"], frames_per_buffer=rate // 10,
                      stream_callback=got)
     stream.start_stream()
     print(json.dumps({"ready": dev["name"], "rate": rate, "channels": ch}), flush=True)
@@ -756,14 +756,23 @@ try:
         sys.exit(0)
     t0, total = line["t0"], max(1, int(line["secs"] * rate))
     track = np.zeros((total, 2), dtype=np.int16)
-    for arrived, data in chunks:               # each block placed where it was heard
+    # v9.11.4: lay the blocks BACK TO BACK, counting samples. v9.11.3 placed each
+    # block at its arrival time; arrival wobbles by a few ms, so blocks overlapped
+    # or left tiny gaps ~20 times a second: the sound "broke up". Arrival time is
+    # used only (a) to anchor the first block and (b) to find REAL gaps: loopback
+    # sends nothing while nothing plays, so a block arriving much later than the
+    # sample count says means silence went before it.
+    cursor = None                              # sample index (from t0) where the next block goes
+    for arrived, data in chunks:
         x = np.frombuffer(data, dtype="<i2").reshape(-1, ch)
         x = np.repeat(x[:, :1], 2, axis=1) if ch == 1 else x[:, :2]
-        end = int((arrived - t0) * rate)
-        start = end - len(x)
-        a, b = max(start, 0), min(end, total)
+        heard = int((arrived - t0) * rate) - len(x)       # where its timestamp says it starts
+        if cursor is None or heard - cursor > rate // 5:  # first block, or a gap > 0.2 s
+            cursor = heard
+        a, b = max(cursor, 0), min(cursor + len(x), total)
         if b > a:
-            track[a:b] = x[a - start:b - start]
+            track[a:b] = x[a - cursor:b - cursor]
+        cursor += len(x)
     with wave.open(cfg["out"], "wb") as w:
         w.setnchannels(2); w.setsampwidth(2); w.setframerate(rate)
         w.writeframes(track.astype("<i2").tobytes())
@@ -864,7 +873,7 @@ def mux_video(video: str, wavs: list, dst: str):
         cmd += ["-c:v", "mpeg4", "-q:v", "3", "-c:a", "pcm_s16le"]
     else:
         cmd += ["-c:v", "libx264", "-preset", "veryfast", "-crf", "23", "-pix_fmt", "yuv420p",
-                "-movflags", "+faststart", "-c:a", "aac", "-b:a", "160k"]
+                "-movflags", "+faststart", "-c:a", "aac", "-b:a", "192k"]
     cmd.append(dst)
     flags = 0x08000000 if IS_WINDOWS else 0            # CREATE_NO_WINDOW: no console flash
     r = subprocess.run(cmd, capture_output=True, text=True, creationflags=flags)
@@ -1663,68 +1672,125 @@ class App:
 
     def recording_done(self, tmp_path: str, frames: int, size: tuple,
                        wavs: list = (), audio_note: str = ""):
+        """v9.11.4: like the Snipping Tool. After ⏹ Stop the video is joined with its
+        sound straight away, and a small window offers ▶ Play (your normal video
+        player, as often as you like), 💾 Save… and 🗑 Discard."""
         self.recorder = None
         self.root.deiconify()
+        wavs = list(wavs)
+        if frames == 0:
+            self._tidy(*wavs)
+            messagebox.showerror("Recording", "No frames were captured.")
+            return
+        secs = frames / Recorder.FPS
+        notes = [audio_note] if audio_note else []
+        preview = None                                     # the MP4 with sound, ready to play/save
+        if _ffmpeg_exe():
+            preview = os.path.splitext(tmp_path)[0] + "_final.mp4"
+            self.status.config(text="Preparing the recording…")
+            self.root.update_idletasks()
+            try:
+                mux_video(tmp_path, wavs, preview)
+            except Exception as e:
+                self._tidy(preview)
+                preview = None
+                notes.append(f"Could not add the sound ({e}).")
+        elif wavs:
+            notes.append("To get sound in the video:  pip install imageio-ffmpeg")
+        rec = {"tmp": tmp_path, "wavs": wavs, "preview": preview, "secs": secs, "notes": notes}
+        self._recording_window(rec)
 
-        def tidy(*paths):
-            for x in paths:
+    @staticmethod
+    def _tidy(*paths):
+        for x in paths:
+            if x:
                 try:
                     os.remove(x)
                 except Exception:
                     pass
 
-        if frames == 0:
-            tidy(*wavs)
-            messagebox.showerror("Recording", "No frames were captured.")
-            return
-        secs = frames / Recorder.FPS
+    @staticmethod
+    def _open_file(path: str):
+        """Open with the default app (Windows: Films & TV / Media Player)."""
+        if IS_WINDOWS:
+            os.startfile(path)                             # noqa: the Windows "double-click"
+        else:
+            subprocess.Popen(["xdg-open", path])
+
+    def _recording_window(self, rec: dict):
+        has_sound = bool(rec["wavs"]) and rec["preview"] is not None
+        w = tk.Toplevel(self.root)
+        w.title("Recording ready")
+        w.attributes("-topmost", True)
+        w.resizable(False, False)
+        m, sec = divmod(int(round(rec["secs"])), 60)
+        tk.Label(w, text=f"⏺  {m}:{sec:02d}  " + ("with sound" if has_sound else "no sound"),
+                 font=("Segoe UI", 12, "bold")).pack(padx=18, pady=(14, 4))
+        if rec["notes"]:
+            tk.Label(w, text="\n".join(rec["notes"]), fg="#b45309", justify="left",
+                     wraplength=420).pack(padx=18, pady=(0, 6))
+        row = tk.Frame(w)
+        row.pack(padx=14, pady=(6, 14))
+
+        def play():
+            try:
+                self._open_file(rec["preview"] or rec["tmp"])
+            except Exception as e:
+                messagebox.showerror("Play", str(e), parent=w)
+
+        def save():
+            if self._save_recording(rec, parent=w):
+                w.destroy()
+
+        def discard():
+            if messagebox.askyesno("Discard", "Delete this recording?", parent=w):
+                self._tidy(rec["tmp"], rec["preview"], *rec["wavs"])
+                self.status.config(text="Recording discarded.")
+                w.destroy()
+
+        for text, cmd, bg in (("▶ Play", play, "#2563eb"), ("💾 Save…", save, "#15803d"),
+                              ("🗑 Discard", discard, "#64748b")):
+            tk.Button(row, text=text, command=cmd, bg=bg, fg="white", relief="flat",
+                      padx=14, pady=6, font=("Segoe UI", 10, "bold"),
+                      activebackground=bg).pack(side="left", padx=4)
+        w.protocol("WM_DELETE_WINDOW", discard)            # closing = discard, after asking
+        self.status.config(text="Recording ready: ▶ Play, 💾 Save or 🗑 Discard.")
+
+    def _save_recording(self, rec: dict, parent=None) -> bool:
+        """Ask where, then save. True when saved (the window can close)."""
         p = filedialog.asksaveasfilename(
-            defaultextension=".mp4",
+            parent=parent, defaultextension=".mp4",
             initialfile=time.strftime("recording_%Y%m%d_%H%M%S.mp4"),
             filetypes=[("MP4 video", "*.mp4"), ("AVI video", "*.avi"),
                        ("Animated GIF (no sound)", "*.gif")])
         if not p:
-            tidy(tmp_path, *wavs)
-            self.status.config(text="Recording discarded.")
-            return
+            return False                                   # back to Play / Save / Discard
         ext = os.path.splitext(p)[1].lower()
-        notes = [audio_note] if audio_note else []
+        notes = []
         try:
             if ext == ".gif":
-                self._to_gif(tmp_path, p)
-                if wavs:
+                self._to_gif(rec["tmp"], p)
+                if rec["wavs"]:
                     notes.append("GIF has no sound: save as MP4 to keep it.")
-            elif ext in (".mp4", ".avi") and _ffmpeg_exe():
-                # v9.11: one ffmpeg pass joins the sound and re-encodes (H.264 for MP4).
-                # Written next to tmp first, then MOVED: os.replace cannot cross drives.
-                out = os.path.splitext(tmp_path)[0] + "_final" + ext
-                try:
-                    mux_video(tmp_path, list(wavs), out)
-                    shutil.move(out, p)
-                except Exception as e:                     # fall back: silent video + WAV
-                    tidy(out)
-                    self._save_silent(tmp_path, p, ext)
-                    notes.append(f"Could not add the sound ({e}).")
-                    for w in wavs:
-                        keep = os.path.splitext(p)[0] + "_" + w.rsplit("_", 1)[-1]
-                        shutil.copy(w, keep)
-                        notes.append(f"Sound kept as {keep}")
+            elif ext == ".avi" and _ffmpeg_exe():
+                mux_video(rec["tmp"], rec["wavs"], p)
+            elif rec["preview"]:                           # MP4: the prepared file, as it is
+                shutil.copy(rec["preview"], p)             # copy: works across drives
             else:
-                self._save_silent(tmp_path, p, ext)
-                if wavs:                                   # no ffmpeg: keep the sound next to it
-                    for w in wavs:
-                        keep = os.path.splitext(p)[0] + "_" + w.rsplit("_", 1)[-1]
-                        shutil.copy(w, keep)
-                        notes.append(f"Sound saved separately as {keep}")
-                    notes.append("To get one file with sound:  pip install imageio-ffmpeg")
-            tidy(tmp_path, *wavs)
-            sound = " with sound" if (wavs and ext != ".gif" and not any(n.startswith("Could not") for n in notes)) else ""
-            self.status.config(text=f"Saved {secs:.0f}s recording{sound}: {p}")
-            if notes:
-                messagebox.showinfo("Recording saved", "\n\n".join(notes))
+                self._save_silent(rec["tmp"], p, ext)
+                for wv in rec["wavs"]:                     # no ffmpeg: keep the sound next to it
+                    keep = os.path.splitext(p)[0] + "_" + wv.rsplit("_", 1)[-1]
+                    shutil.copy(wv, keep)
+                    notes.append(f"Sound saved separately as {keep}")
         except Exception as e:
-            messagebox.showerror("Save failed",
-                                 f"{e}\n\nThe recording is still here:\n{tmp_path}")
+            messagebox.showerror("Save failed", f"{e}\n\nThe recording is still here:\n"
+                                 f"{rec['preview'] or rec['tmp']}", parent=parent)
+            return False
+        self._tidy(rec["tmp"], rec["preview"], *rec["wavs"])
+        self.status.config(text=f"Saved {rec['secs']:.0f}s recording: {p}")
+        if notes:
+            messagebox.showinfo("Recording saved", "\n\n".join(notes), parent=parent)
+        return True
 
     def _save_silent(self, tmp_path: str, p: str, ext: str):
         """The pre-9.11 path, without sound. shutil.move also works across drives."""
