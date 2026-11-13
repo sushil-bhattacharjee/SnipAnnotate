@@ -40,7 +40,7 @@ except ImportError:          # recording is optional; snipping works without it
     cv2 = None
     np = None
 
-__version__ = "9.11.2"
+__version__ = "9.11.3"
 
 
 def _install_crash_log():
@@ -699,9 +699,9 @@ class FreeformSelector:
 
 
 def _audio_available() -> bool:
-    """v9.11: sound recording needs `soundcard` (mic + PC sound, Windows WASAPI)."""
+    """v9.11.3: sound recording needs PyAudioWPatch (mic + PC sound, Windows WASAPI)."""
     import importlib.util
-    return np is not None and importlib.util.find_spec("soundcard") is not None
+    return np is not None and importlib.util.find_spec("pyaudiowpatch") is not None
 
 
 def _ffmpeg_exe():
@@ -713,60 +713,69 @@ def _ffmpeg_exe():
         return shutil.which("ffmpeg")
 
 
-# v9.11.2: each sound source records in its OWN small Python process. soundcard
-# (WASAPI via cffi/COM) corrupted the heap when used from threads inside the app
-# ("Windows fatal exception: code 0xc0000374" and the app vanished). In a helper
-# process it runs on that process's main thread, the way it is meant to be used,
-# and if it crashes only the helper dies: the app and the video survive.
+# v9.11.3: each sound source records in its OWN small Python process (since
+# v9.11.2: a crash there kills only the helper, never the app), now with
+# PyAudioWPatch (PortAudio + Windows WASAPI loopback). The first library,
+# soundcard, crashed with heap corruption (0xc0000374) on Python 3.13 even in
+# its own process. Callback mode: Windows sends NO loopback data while nothing
+# plays, so the helper collects what arrives and the timeline fills gaps with silence.
 AUDIO_CHILD = r"""
 import json, sys, threading, time, wave
 import numpy as np
-cfg = json.loads(sys.argv[1])                  # {"source": "mic"|"system", "rate": 48000, "out": path}
-RATE, BLOCK = cfg["rate"], cfg["rate"] // 10
-stop = {"t0": None, "secs": None}
+cfg = json.loads(sys.argv[1])                  # {"source": "mic"|"system", "out": path}
+line = {}
 def watch():                                   # the app sends "t0 seconds" on stdin when it stops
-    line = sys.stdin.readline().split()
-    if len(line) == 2:
-        stop["t0"], stop["secs"] = float(line[0]), float(line[1])
-    stop["done"] = True
-stop["done"] = False
+    parts = sys.stdin.readline().split()
+    if len(parts) == 2:
+        line["t0"], line["secs"] = float(parts[0]), float(parts[1])
+    line["done"] = True
 threading.Thread(target=watch, daemon=True).start()
 chunks = []
 try:
-    import soundcard as sc
+    import pyaudiowpatch as pyaudio
+    pa = pyaudio.PyAudio()
     if cfg["source"] == "mic":
-        dev = sc.default_microphone()
+        dev = pa.get_default_wasapi_device(d_in=True)
     else:
-        dev = sc.get_microphone(id=str(sc.default_speaker().name), include_loopback=True)
-    print(json.dumps({"ready": dev.name}), flush=True)
-    with dev.recorder(samplerate=RATE) as rec:
-        while not stop["done"]:
-            chunks.append((time.time(), rec.record(numframes=BLOCK)))
-    if stop["secs"] is None:                   # cancelled: nothing to write
+        dev = pa.get_default_wasapi_loopback()
+    rate = int(dev["defaultSampleRate"])
+    ch = max(1, int(dev["maxInputChannels"]))
+    def got(data, frames, info, status):       # PortAudio calls this with each block
+        chunks.append((time.time(), data))
+        return (None, pyaudio.paContinue)
+    stream = pa.open(format=pyaudio.paInt16, channels=ch, rate=rate, input=True,
+                     input_device_index=dev["index"], frames_per_buffer=rate // 20,
+                     stream_callback=got)
+    stream.start_stream()
+    print(json.dumps({"ready": dev["name"], "rate": rate, "channels": ch}), flush=True)
+    while "done" not in line:
+        time.sleep(0.05)
+    stream.stop_stream(); stream.close(); pa.terminate()
+    if "secs" not in line:                     # cancelled: nothing to write
         print(json.dumps({"cancelled": True}), flush=True)
         sys.exit(0)
-    t0, total = stop["t0"], max(1, int(stop["secs"] * RATE))
-    track = np.zeros((total, 2), dtype=np.float32)
-    for arrived, data in chunks:               # each 0.1 s block placed where it was heard
-        if data.ndim == 1:
-            data = data[:, None]
-        data = np.repeat(data, 2, axis=1) if data.shape[1] == 1 else data[:, :2]
-        end = int((arrived - t0) * RATE)
-        start = end - len(data)
+    t0, total = line["t0"], max(1, int(line["secs"] * rate))
+    track = np.zeros((total, 2), dtype=np.int16)
+    for arrived, data in chunks:               # each block placed where it was heard
+        x = np.frombuffer(data, dtype="<i2").reshape(-1, ch)
+        x = np.repeat(x[:, :1], 2, axis=1) if ch == 1 else x[:, :2]
+        end = int((arrived - t0) * rate)
+        start = end - len(x)
         a, b = max(start, 0), min(end, total)
         if b > a:
-            track[a:b] = data[a - start:b - start]
+            track[a:b] = x[a - start:b - start]
     with wave.open(cfg["out"], "wb") as w:
-        w.setnchannels(2); w.setsampwidth(2); w.setframerate(RATE)
-        w.writeframes((np.clip(track, -1, 1) * 32767).astype("<i2").tobytes())
-    print(json.dumps({"wav": cfg["out"], "peak": float(np.abs(track).max())}), flush=True)
+        w.setnchannels(2); w.setsampwidth(2); w.setframerate(rate)
+        w.writeframes(track.astype("<i2").tobytes())
+    print(json.dumps({"wav": cfg["out"], "peak": int(np.abs(track.astype(np.int32)).max()),
+                      "blocks": len(chunks), "device": dev["name"]}), flush=True)
 except Exception as e:
     print(json.dumps({"error": f"{type(e).__name__}: {e}"}), flush=True)
 """
 
 
 class AudioRecorder:
-    """v9.11.2: records the microphone and/or what the PC plays (WASAPI loopback),
+    """v9.11.3: records the microphone and/or what the PC plays (WASAPI loopback),
     one helper process per source (see AUDIO_CHILD). Like the Windows Snipping
     Tool's 🎤 and 🔊. Started at the 3-2-1 countdown so the helpers are ready when
     ▶ starts; anything heard before the first frame is dropped."""
@@ -784,7 +793,7 @@ class AudioRecorder:
     def start(self):
         flags = 0x08000000 if IS_WINDOWS else 0          # CREATE_NO_WINDOW
         for s in self.sources:
-            cfg = json.dumps({"source": s, "rate": self.RATE, "out": self.out[s]})
+            cfg = json.dumps({"source": s, "out": self.out[s]})
             try:
                 self.procs[s] = subprocess.Popen(
                     [sys.executable, "-c", AUDIO_CHILD, cfg],
@@ -816,8 +825,9 @@ class AudioRecorder:
                 self.errors[s] = result["error"]
             elif result.get("wav") and os.path.exists(result["wav"]):
                 wavs.append(result["wav"])
-                if result.get("peak", 1) < 0.001:
-                    self.errors[s] = "recorded only silence (muted, or the wrong default device?)"
+                if result.get("peak", 1) < 30 and s == "mic":     # out of 32767
+                    self.errors[s] = (f"recorded only silence from '{result.get('device', '?')}' "
+                                      "(muted, or not the default microphone?)")
             elif p.returncode not in (0, None):
                 self.errors[s] = (f"the sound helper crashed (exit code 0x{p.returncode & 0xFFFFFFFF:08X})"
                                   + (f": {err.strip().splitlines()[-1]}" if (err or "").strip() else ""))
@@ -845,7 +855,8 @@ def mux_video(video: str, wavs: list, dst: str):
     for w in wavs:
         cmd += ["-i", w]
     if len(wavs) == 2:
-        cmd += ["-filter_complex", "[1:a][2:a]amix=inputs=2:duration=longest:normalize=0[a]",
+        cmd += ["-filter_complex", "[1:a]aresample=48000[x];[2:a]aresample=48000[y];"
+                "[x][y]amix=inputs=2:duration=longest:normalize=0[a]",
                 "-map", "0:v", "-map", "[a]"]
     elif wavs:
         cmd += ["-map", "0:v", "-map", "1:a"]
@@ -951,8 +962,8 @@ class Recorder:
         if not (mic or system):
             return
         if not _audio_available():
-            self.audio_note = ("Recorded WITHOUT sound: the soundcard package is missing.\n"
-                               "Install it once:  pip install soundcard imageio-ffmpeg")
+            self.audio_note = ("Recorded WITHOUT sound: the PyAudioWPatch package is missing.\n"
+                               "Install it once:  pip install PyAudioWPatch imageio-ffmpeg")
             return
         self.audio = AudioRecorder(mic, system)
         self.audio.start()

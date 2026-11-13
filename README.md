@@ -1,4 +1,4 @@
-# SnipAnnotate — Installation Guide (v9.11)
+# SnipAnnotate — Installation Guide (v9.11.3)
 
 A single-file Windows screen-capture + annotation tool (`snipannotate.py`).
 No installer, no registry — one Python file plus a few pip packages.
@@ -16,7 +16,7 @@ Repo: https://github.com/sushil-bhattacharjee/SnipAnnotate.git
 | git | any | *optional* — only to clone/pull the repo |
 | Pillow | any current | screenshots, image handling — **required** |
 | opencv-python + numpy | any current | ⏺ screen recording — *optional* |
-| soundcard + imageio-ffmpeg | any current | 🎤 / 🔊 sound in recordings (v9.11) — *optional* |
+| PyAudioWPatch + imageio-ffmpeg | any current | 🎤 / 🔊 sound in recordings (v9.11) — *optional* |
 | winrt (5 packages) | any current | 🔤 OCR (Windows built-in engine) — *optional* |
 
 tkinter ships with the python.org installer — nothing extra for the UI.
@@ -101,7 +101,7 @@ pip install pillow
 pip install opencv-python numpy
 
 # optional: sound in recordings, your mic and/or PC sound (v9.11)
-pip install soundcard imageio-ffmpeg
+pip install PyAudioWPatch imageio-ffmpeg
 
 # optional: OCR / in-picture text selection (copy this whole line)
 pip install winrt-Windows.Foundation winrt-Windows.Foundation.Collections winrt-Windows.Graphics.Imaging winrt-Windows.Media.Ocr winrt-Windows.Storage.Streams
@@ -120,7 +120,7 @@ one file. GIF has no sound.
 - Windows must allow the microphone: *Settings → Privacy & security → Microphone →
   Let desktop apps access your microphone*.
 - Without `imageio-ffmpeg` the video is saved silent and the sound next to it as a
-  `.wav`; without `soundcard` it records silently and tells you what to install.
+  `.wav`; without `PyAudioWPatch` it records silently and tells you what to install.
 - Recordings can now be saved to any drive (before v9.11 a save to another drive
   failed and left the file in `%TEMP%` as `snip_rec_*.mp4`).
 
