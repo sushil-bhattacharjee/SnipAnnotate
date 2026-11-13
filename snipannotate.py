@@ -40,7 +40,7 @@ except ImportError:          # recording is optional; snipping works without it
     cv2 = None
     np = None
 
-__version__ = "9.11.6"
+__version__ = "9.11.7"
 
 
 def _install_crash_log():
@@ -916,27 +916,9 @@ class Recorder:
         self.size = (w, h)
         self.tmp = os.path.join(tempfile.gettempdir(),
                                 f"snip_rec_{int(self.t0)}.mp4")
-        # v6: VideoWriter fails SILENTLY when the codec is unavailable — you get a
-        # 0-byte file and no error. Try mp4v, then fall back to MJPG/.avi, and
-        # verify isOpened() before we pretend to be recording.
         self.writer = None
         self.err = None
-        # v9.11.6: MJPG first: much faster to write than mp4v and keeps text sharp;
-        # what you save is re-encoded to H.264 by ffmpeg anyway.
-        for fourcc, ext in (("MJPG", ".avi"), ("mp4v", ".mp4"), ("XVID", ".avi")):
-            path = os.path.splitext(self.tmp)[0] + ext
-            w = cv2.VideoWriter(path, cv2.VideoWriter_fourcc(*fourcc),
-                                self.FPS, self.size)
-            if w.isOpened():
-                self.writer = w
-                self.tmp = path
-                self.codec = fourcc
-                break
-            w.release()
-        if self.writer is None:
-            self.err = ("No usable video codec was found (tried mp4v, MJPG, XVID).\n"
-                        "Try:  pip install --upgrade opencv-python")
-            raise RuntimeError(self.err)
+        self._open_writer()
 
         self.audio = None                           # v9.11: AudioRecorder while recording
         self.wavs = []
@@ -954,6 +936,33 @@ class Recorder:
         if autostart:
             self.begin()
 
+    def _open_writer(self):
+        """v6: VideoWriter fails SILENTLY when the codec is unavailable (a 0-byte
+        file, no error): try codecs in turn and check isOpened(). v9.11.6: MJPG
+        first (fast, sharp text; the saved file is H.264 anyway). v9.11.7: a method,
+        so Start can re-open it when the area was resized while READY."""
+        if self.writer is not None:
+            self.writer.release()
+            try:
+                os.remove(self.tmp)
+            except Exception:
+                pass
+            self.writer = None
+        for fourcc, ext in (("MJPG", ".avi"), ("mp4v", ".mp4"), ("XVID", ".avi")):
+            path = os.path.splitext(self.tmp)[0] + ext
+            w = cv2.VideoWriter(path, cv2.VideoWriter_fourcc(*fourcc),
+                                self.FPS, self.size)
+            if w.isOpened():
+                self.writer = w
+                self.tmp = path
+                self.codec = fourcc
+                self._writer_size = self.size
+                return
+            w.release()
+        self.err = ("No usable video codec was found (tried MJPG, mp4v, XVID).\n"
+                    "Try:  pip install --upgrade opencv-python")
+        raise RuntimeError(self.err)
+
     # ---------------- v7: explicit start ----------------
     def begin(self, countdown: int = 3):
         """Count down, then actually start capturing."""
@@ -966,6 +975,11 @@ class Recorder:
             self.timer.config(text=str(countdown), fg="#fbbf24")
             self.bar.after(700, lambda: self.begin(countdown - 1))
             return
+        if self.size != getattr(self, "_writer_size", self.size):
+            self._open_writer()                    # v9.11.7: resized while READY
+        if getattr(self, "sizer", None):           # v9.11.7: size is fixed from now on
+            self.sizer.destroy()
+            self.sizer = None
         self.running = True
         self.t0 = time.time()
         self.timer.config(fg="#e5e7eb")
@@ -1001,7 +1015,7 @@ class Recorder:
             pass
         if self.audio:                             # v9.11
             self.audio.cancel()
-        for w in ("bar", "border"):
+        for w in ("bar", "border", "mover", "sizer"):
             x = getattr(self, w, None)
             if x:
                 try:
@@ -1012,34 +1026,92 @@ class Recorder:
         self.app.root.deiconify()
         self.app.status.config(text="Recording cancelled.")
 
+    RIM, GAP = 3, 2           # v9.11.5: rim width, and its distance outside the area
+
     def _build_border(self):
-        """v6: a red outline around the area being recorded — you could not see
-        WHAT was being captured before."""
+        """v6: a red outline around the area being recorded. v9.11.5: just OUTSIDE
+        the area (it used to be captured as a red line round the video).
+        v9.11.7: a ✥ Move tab (drag: moves the area, also while recording) and,
+        until Start, a ◢ tab to resize it. All excluded from the video."""
+        self.mover = self.sizer = None
         try:
-            # v9.11.5: the rim goes just OUTSIDE the recorded area. It used to sit
-            # exactly on it, so its 3 px were captured into every frame (a red line
-            # round the video). RIM px wide, GAP px clear of the area.
-            RIM, GAP = 3, 2
-            x = self.bbox[0] + self.vx - RIM - GAP
-            y = self.bbox[1] + self.vy - RIM - GAP
-            w, h = self.size[0] + 2 * (RIM + GAP), self.size[1] + 2 * (RIM + GAP)
             self.border = tk.Toplevel(self.app.root)
             self.border.overrideredirect(True)
             self.border.attributes("-topmost", True)
             self.border.attributes("-alpha", 0.9)
-            self.border.geometry(f"{w}x{h}+{x}+{y}")
             self.border.configure(bg="#ef4444")
             # punch a hole: an inner frame the colour of nothing -> only the rim shows
             inner = tk.Frame(self.border, bg="#ef4444")
-            inner.pack(fill="both", expand=True, padx=RIM, pady=RIM)
-            self._exclude_from_capture(self.border)
+            inner.pack(fill="both", expand=True, padx=self.RIM, pady=self.RIM)
             try:                                    # click-through, and don't record it
                 self.border.attributes("-transparentcolor", "#000001")
                 inner.configure(bg="#000001")
             except Exception:
                 pass
+            self.mover = self._tab("✥ Move", "fleur", self._drag_move,
+                                   "Drag to move the recording area (also while recording)")
+            self.sizer = self._tab("◢", "size_nw_se", self._drag_size,
+                                   "Drag to resize (before Start)")
+            self._place_border()
+            for w in (self.border, self.mover, self.sizer):
+                self._exclude_from_capture(w)
         except Exception:
             self.border = None
+
+    def _tab(self, text, cursor, on_drag, tip):
+        t = tk.Toplevel(self.app.root)
+        t.overrideredirect(True)
+        t.attributes("-topmost", True)
+        lbl = tk.Label(t, text=text, bg="#ef4444", fg="white", cursor=cursor,
+                       font=("Segoe UI", 9, "bold"), padx=6, pady=1)
+        lbl.pack()
+        lbl.bind("<ButtonPress-1>", lambda e: setattr(self, "_drag0",
+                 (e.x_root, e.y_root, self.bbox, self.size)))
+        lbl.bind("<B1-Motion>", on_drag)
+        return t
+
+    def _place_border(self):
+        """Put the rim and its tabs round self.bbox (window coords = bbox + offset)."""
+        R = self.RIM + self.GAP
+        x, y = self.bbox[0] + self.vx - R, self.bbox[1] + self.vy - R
+        w, h = self.size[0] + 2 * R, self.size[1] + 2 * R
+        if self.border:
+            self.border.geometry(f"{w}x{h}+{x}+{y}")
+        if self.mover:                              # above the top-left corner, or
+            self.mover.update_idletasks()           # below it when there is no room
+            th = self.mover.winfo_reqheight()
+            g = virtual_geom()
+            top = g["y"] if g else 0
+            self.mover.geometry(f"+{x}+{y - th if y - th >= top else y + h}")
+        if self.sizer:                              # just past the bottom-right corner
+            self.sizer.geometry(f"+{x + w}+{y + h}")
+
+    def _clamp(self, x0, y0, w, h):
+        """Keep the area on the desktop (image coords: 0 .. virtual width/height)."""
+        g = virtual_geom()
+        if g:
+            x0 = min(max(x0, 0), max(g["w"] - w, 0))
+            y0 = min(max(y0, 0), max(g["h"] - h, 0))
+        return x0, y0
+
+    def _drag_move(self, e):
+        sx, sy, (x0, y0, x1, y1), _ = self._drag0
+        nx, ny = self._clamp(x0 + e.x_root - sx, y0 + e.y_root - sy, x1 - x0, y1 - y0)
+        self.bbox = (nx, ny, nx + (x1 - x0), ny + (y1 - y0))   # one assignment: the grab
+        self._place_border()                                  # thread reads it whole
+
+    def _drag_size(self, e):
+        if self.running:                            # the video size is fixed once started
+            return
+        sx, sy, (x0, y0, _, _), (w0, h0) = self._drag0
+        g = virtual_geom()
+        w = max(120, w0 + e.x_root - sx) // 2 * 2   # even sizes for the codecs
+        h = max(80, h0 + e.y_root - sy) // 2 * 2
+        if g:
+            w, h = min(w, g["w"] - x0) // 2 * 2, min(h, g["h"] - y0) // 2 * 2
+        self.size = (w, h)
+        self.bbox = (x0, y0, x0 + w, y0 + h)
+        self._place_border()
 
     @staticmethod
     def _exclude_from_capture(win):
@@ -1068,12 +1140,27 @@ class Recorder:
         by = max(self.bbox[1] + self.vy - 44, 0)
         self.bar.geometry(f"+{bx}+{by}")
         self._exclude_from_capture(self.bar)           # v9.11.5: never in the video
+        # v9.11.7: drag the bar anywhere by its ⠿ grip (or the REC / timer text), so
+        # it never blocks what you need to click.
+        grip = tk.Label(self.bar, text="⠿", fg="#9ca3af", bg="#111827", cursor="fleur",
+                        font=("Segoe UI", 13))
+        grip.pack(side="left", padx=(8, 0), pady=4)
         self.rec_lbl = tk.Label(self.bar, text="● READY", fg="#fbbf24", bg="#111827",
-                                font=("Segoe UI", 11, "bold"))
-        self.rec_lbl.pack(side="left", padx=(10, 4), pady=6)
+                                font=("Segoe UI", 11, "bold"), cursor="fleur")
+        self.rec_lbl.pack(side="left", padx=(6, 4), pady=6)
         self.timer = tk.Label(self.bar, text="0:00", fg="#e5e7eb", bg="#111827",
-                              font=("Consolas", 11))
+                              font=("Consolas", 11), cursor="fleur")
         self.timer.pack(side="left", padx=4)
+
+        def press(e):
+            self._bar0 = (e.x_root, e.y_root, self.bar.winfo_x(), self.bar.winfo_y())
+
+        def drag(e):
+            sx, sy, bx0, by0 = self._bar0
+            self.bar.geometry(f"+{bx0 + e.x_root - sx}+{by0 + e.y_root - sy}")
+        for wdg in (grip, self.rec_lbl, self.timer):
+            wdg.bind("<ButtonPress-1>", press)
+            wdg.bind("<B1-Motion>", drag)
 
         # v9.11: sound, like the Snipping Tool: 🎤 your voice, 🔊 what the PC plays
         self.audio_boxes = []
@@ -1131,8 +1218,6 @@ class Recorder:
         # v6.1: self.bbox is in VIRTUAL-DESKTOP IMAGE coordinates (0-based).
         # Screen grabs want SCREEN coordinates, whose origin is the virtual origin,
         # NEGATIVE when a monitor sits left of or above the primary.
-        grab_box = (self.bbox[0] + self.vx, self.bbox[1] + self.vy,
-                    self.bbox[2] + self.vx, self.bbox[3] + self.vy)
         sct = None
         if _HAS_MSS:
             try:
@@ -1140,10 +1225,14 @@ class Recorder:
                 sct = (getattr(mss, "MSS", None) or mss.mss)()   # mss 10+ renamed mss.mss
             except Exception as e:
                 self.last_error = f"mss: {e}"
-        area = {"left": grab_box[0], "top": grab_box[1],
-                "width": self.size[0], "height": self.size[1]}
         try:
             while not self.stop_flag.is_set():
+                # v9.11.7: read the area EVERY frame: ✥ Move can shift it mid-recording
+                bb = self.bbox
+                grab_box = (bb[0] + self.vx, bb[1] + self.vy,
+                            bb[0] + self.vx + self.size[0], bb[1] + self.vy + self.size[1])
+                area = {"left": grab_box[0], "top": grab_box[1],
+                        "width": self.size[0], "height": self.size[1]}
                 try:
                     if sct is not None:
                         shot = np.asarray(sct.grab(area))           # BGRA, just the area
@@ -1222,11 +1311,13 @@ class Recorder:
                 self.audio_note = "Sound problem: " + "; ".join(
                     f"{k}: {v}" for k, v in self.audio.errors.items())
         self.bar.destroy()
-        if getattr(self, "border", None):          # v6
-            try:
-                self.border.destroy()
-            except Exception:
-                pass
+        for w in ("border", "mover", "sizer"):     # v6 / v9.11.7
+            x = getattr(self, w, None)
+            if x:
+                try:
+                    x.destroy()
+                except Exception:
+                    pass
         # v6: tell the truth about what happened, instead of handing over an
         # empty file as if it had worked.
         if self.frames == 0:
