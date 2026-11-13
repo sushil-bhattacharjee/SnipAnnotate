@@ -16,6 +16,7 @@ Run:           python snip_annotate.py
 from __future__ import annotations
 
 import io
+import json
 import os
 import platform
 import shutil
@@ -39,7 +40,7 @@ except ImportError:          # recording is optional; snipping works without it
     cv2 = None
     np = None
 
-__version__ = "9.11.1"
+__version__ = "9.11.2"
 
 
 def _install_crash_log():
@@ -712,88 +713,126 @@ def _ffmpeg_exe():
         return shutil.which("ffmpeg")
 
 
-class AudioRecorder:
-    """v9.11: records the microphone and/or what the PC plays (WASAPI loopback),
-    each in its own thread, while the Recorder captures the screen. Like the
-    Windows Snipping Tool's 🎤 and 🔊 buttons.
+# v9.11.2: each sound source records in its OWN small Python process. soundcard
+# (WASAPI via cffi/COM) corrupted the heap when used from threads inside the app
+# ("Windows fatal exception: code 0xc0000374" and the app vanished). In a helper
+# process it runs on that process's main thread, the way it is meant to be used,
+# and if it crashes only the helper dies: the app and the video survive.
+AUDIO_CHILD = r"""
+import json, sys, threading, time, wave
+import numpy as np
+cfg = json.loads(sys.argv[1])                  # {"source": "mic"|"system", "rate": 48000, "out": path}
+RATE, BLOCK = cfg["rate"], cfg["rate"] // 10
+stop = {"t0": None, "secs": None}
+def watch():                                   # the app sends "t0 seconds" on stdin when it stops
+    line = sys.stdin.readline().split()
+    if len(line) == 2:
+        stop["t0"], stop["secs"] = float(line[0]), float(line[1])
+    stop["done"] = True
+stop["done"] = False
+threading.Thread(target=watch, daemon=True).start()
+chunks = []
+try:
+    import soundcard as sc
+    if cfg["source"] == "mic":
+        dev = sc.default_microphone()
+    else:
+        dev = sc.get_microphone(id=str(sc.default_speaker().name), include_loopback=True)
+    print(json.dumps({"ready": dev.name}), flush=True)
+    with dev.recorder(samplerate=RATE) as rec:
+        while not stop["done"]:
+            chunks.append((time.time(), rec.record(numframes=BLOCK)))
+    if stop["secs"] is None:                   # cancelled: nothing to write
+        print(json.dumps({"cancelled": True}), flush=True)
+        sys.exit(0)
+    t0, total = stop["t0"], max(1, int(stop["secs"] * RATE))
+    track = np.zeros((total, 2), dtype=np.float32)
+    for arrived, data in chunks:               # each 0.1 s block placed where it was heard
+        if data.ndim == 1:
+            data = data[:, None]
+        data = np.repeat(data, 2, axis=1) if data.shape[1] == 1 else data[:, :2]
+        end = int((arrived - t0) * RATE)
+        start = end - len(data)
+        a, b = max(start, 0), min(end, total)
+        if b > a:
+            track[a:b] = data[a - start:b - start]
+    with wave.open(cfg["out"], "wb") as w:
+        w.setnchannels(2); w.setsampwidth(2); w.setframerate(RATE)
+        w.writeframes((np.clip(track, -1, 1) * 32767).astype("<i2").tobytes())
+    print(json.dumps({"wav": cfg["out"], "peak": float(np.abs(track).max())}), flush=True)
+except Exception as e:
+    print(json.dumps({"error": f"{type(e).__name__}: {e}"}), flush=True)
+"""
 
-    Every 0.1 s block is stored with the time it arrived and placed on a timeline
-    that starts at the video's first frame, so sound and picture stay in step even
-    if a device starts late or pauses (silence fills any gap)."""
+
+class AudioRecorder:
+    """v9.11.2: records the microphone and/or what the PC plays (WASAPI loopback),
+    one helper process per source (see AUDIO_CHILD). Like the Windows Snipping
+    Tool's 🎤 and 🔊. Started at the 3-2-1 countdown so the helpers are ready when
+    ▶ starts; anything heard before the first frame is dropped."""
 
     RATE = 48000
-    BLOCK = RATE // 10                                  # 0.1 s
 
     def __init__(self, mic: bool, system: bool):
-        import threading
         self.sources = [s for s, on in (("mic", mic), ("system", system)) if on]
-        self.stop_flag = threading.Event()
-        self.chunks = {s: [] for s in self.sources}     # source -> [(arrival time, frames x ch)]
-        self.errors = {}                                # source -> message
-        self.threads = [threading.Thread(target=self._run, args=(s,), daemon=True)
-                        for s in self.sources]
-        self.t0 = time.time()
+        self.procs = {}                                  # source -> Popen
+        self.errors = {}                                 # source -> message
+        stamp = int(time.time() * 1000)
+        self.out = {s: os.path.join(tempfile.gettempdir(), f"snip_rec_{stamp}_{s}.wav")
+                    for s in self.sources}
 
-    def start(self, t0: float):
-        self.t0 = t0
-        for t in self.threads:
-            t.start()
+    def start(self):
+        flags = 0x08000000 if IS_WINDOWS else 0          # CREATE_NO_WINDOW
+        for s in self.sources:
+            cfg = json.dumps({"source": s, "rate": self.RATE, "out": self.out[s]})
+            try:
+                self.procs[s] = subprocess.Popen(
+                    [sys.executable, "-c", AUDIO_CHILD, cfg],
+                    stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                    text=True, creationflags=flags)
+            except Exception as e:
+                self.errors[s] = f"could not start: {e}"
 
-    def _run(self, source: str):
-        try:
-            # Import soundcard HERE, never in the Tk thread: its import calls
-            # CoInitializeEx(MTA), which would upset Tk's file dialogs. It must come
-            # BEFORE our own CoInitializeEx: soundcard treats "already initialised"
-            # (S_FALSE) as an error -> "RuntimeError: Error 0x100000001" (v9.11.1).
-            import soundcard as sc
-            if IS_WINDOWS:                              # the 2nd thread (or a 2nd recording) did
-                import ctypes                           # not run soundcard's import: give it COM.
-                ctypes.windll.ole32.CoInitializeEx(None, 0)   # S_FALSE if it has it: fine
-            if source == "mic":
-                dev = sc.default_microphone()
-            else:                                       # "what you hear" from the default speaker
-                dev = sc.get_microphone(id=str(sc.default_speaker().name), include_loopback=True)
-            with dev.recorder(samplerate=self.RATE) as rec:
-                while not self.stop_flag.is_set():
-                    data = rec.record(numframes=self.BLOCK)
-                    self.chunks[source].append((time.time(), data))
-        except Exception as e:
-            self.errors[source] = f"{type(e).__name__}: {e}"
-
-    def stop(self):
-        self.stop_flag.set()
-        for t in self.threads:
-            t.join(timeout=3)
-
-    def write_wavs(self, seconds: float) -> list:
-        """One 16-bit stereo WAV per source that recorded something, `seconds` long
-        (the video's length). Returns their paths."""
-        import wave
-        out = []
-        total = max(1, int(seconds * self.RATE))
-        for source in self.sources:
-            parts = self.chunks.get(source) or []
-            if not parts:
+    def _finish(self, line: str) -> list:
+        """Send `line` to every helper, wait, return the WAVs they wrote."""
+        wavs = []
+        for s, p in self.procs.items():
+            try:
+                out, err = p.communicate(line, timeout=20)
+            except subprocess.TimeoutExpired:
+                p.kill()
+                self.errors[s] = "did not finish in 20 s"
                 continue
-            track = np.zeros((total, 2), dtype=np.float32)
-            for arrived, data in parts:
-                if data.ndim == 1:
-                    data = data[:, None]
-                data = np.repeat(data, 2, axis=1) if data.shape[1] == 1 else data[:, :2]
-                end = int((arrived - self.t0) * self.RATE)      # this block ended about now
-                start = end - len(data)
-                a, b = max(start, 0), min(end, total)
-                if b > a:
-                    track[a:b] = data[a - start:b - start]
-            pcm = (np.clip(track, -1.0, 1.0) * 32767).astype("<i2")
-            path = os.path.join(tempfile.gettempdir(), f"snip_rec_{int(self.t0)}_{source}.wav")
-            with wave.open(path, "wb") as w:
-                w.setnchannels(2)
-                w.setsampwidth(2)
-                w.setframerate(self.RATE)
-                w.writeframes(pcm.tobytes())
-            out.append(path)
-        return out
+            except Exception as e:
+                self.errors[s] = f"{type(e).__name__}: {e}"
+                continue
+            result = {}
+            for ln in (out or "").splitlines():
+                try:
+                    result.update(json.loads(ln))
+                except ValueError:
+                    pass
+            if "error" in result:
+                self.errors[s] = result["error"]
+            elif result.get("wav") and os.path.exists(result["wav"]):
+                wavs.append(result["wav"])
+                if result.get("peak", 1) < 0.001:
+                    self.errors[s] = "recorded only silence (muted, or the wrong default device?)"
+            elif p.returncode not in (0, None):
+                self.errors[s] = (f"the sound helper crashed (exit code 0x{p.returncode & 0xFFFFFFFF:08X})"
+                                  + (f": {err.strip().splitlines()[-1]}" if (err or "").strip() else ""))
+        return wavs
+
+    def stop(self, t0: float, seconds: float) -> list:
+        return self._finish(f"{t0} {seconds}\n")
+
+    def cancel(self):
+        self._finish("\n")
+        for w in self.out.values():
+            try:
+                os.remove(w)
+            except Exception:
+                pass
 
 
 def mux_video(video: str, wavs: list, dst: str):
@@ -886,13 +925,15 @@ class Recorder:
         """Count down, then actually start capturing."""
         if self.running:
             return
+        if countdown > 0 and not getattr(self, "_audio_armed", False):
+            self._audio_armed = True                # v9.11.2: helpers start now, ready by ▶
+            self._start_audio()
         if countdown > 0:
             self.timer.config(text=str(countdown), fg="#fbbf24")
             self.bar.after(700, lambda: self.begin(countdown - 1))
             return
         self.running = True
         self.t0 = time.time()
-        self._start_audio()                        # v9.11
         self.timer.config(fg="#e5e7eb")
         if hasattr(self, "start_btn"):
             self.start_btn.pack_forget()
@@ -903,7 +944,7 @@ class Recorder:
         self._tick()
 
     def _start_audio(self):
-        """v9.11: start 🎤 / 🔊 recording at the same moment as the first frame."""
+        """v9.11: start 🎤 / 🔊 recording (v9.11.2: at the countdown, in helper processes)."""
         mic, system = self.app.rec_mic.get(), self.app.rec_sys.get()
         for cb in getattr(self, "audio_boxes", []):
             cb.config(state="disabled")             # fixed once recording starts
@@ -914,7 +955,7 @@ class Recorder:
                                "Install it once:  pip install soundcard imageio-ffmpeg")
             return
         self.audio = AudioRecorder(mic, system)
-        self.audio.start(self.t0)
+        self.audio.start()
 
     def cancel(self):
         """v7: abandon an armed (not yet started) recording."""
@@ -925,7 +966,7 @@ class Recorder:
         except Exception:
             pass
         if self.audio:                             # v9.11
-            self.audio.stop()
+            self.audio.cancel()
         for w in ("bar", "border"):
             x = getattr(self, w, None)
             if x:
@@ -1076,12 +1117,7 @@ class Recorder:
             self.thread.join(timeout=5)
         self.writer.release()
         if self.audio:                             # v9.11: sound, as long as the video
-            self.audio.stop()
-            try:
-                self.wavs = self.audio.write_wavs(self.frames / self.FPS)
-            except Exception as e:
-                self.wavs = []
-                self.audio.errors["write"] = f"{type(e).__name__}: {e}"
+            self.wavs = self.audio.stop(self.t0, self.frames / self.FPS)
             if self.audio.errors:
                 self.audio_note = "Sound problem: " + "; ".join(
                     f"{k}: {v}" for k, v in self.audio.errors.items())
