@@ -40,7 +40,7 @@ except ImportError:          # recording is optional; snipping works without it
     cv2 = None
     np = None
 
-__version__ = "9.11.5"
+__version__ = "9.11.6"
 
 
 def _install_crash_log():
@@ -698,6 +698,15 @@ class FreeformSelector:
         self.top.destroy()
 
 
+def _mss_available() -> bool:
+    """v9.11.6: mss grabs just the recorded area (fast); `pip install mss`."""
+    import importlib.util
+    return importlib.util.find_spec("mss") is not None
+
+
+_HAS_MSS = _mss_available()
+
+
 def _audio_available() -> bool:
     """v9.11.3: sound recording needs PyAudioWPatch (mic + PC sound, Windows WASAPI)."""
     import importlib.util
@@ -886,7 +895,10 @@ class Recorder:
     v9.11: with 🎤 / 🔊 on, an AudioRecorder runs alongside and the sound is joined
     to the video when you save."""
 
-    FPS = 12
+    # v9.11.6: 30 fps with mss (grabs only the area, a few ms), as the Snipping
+    # Tool. Without mss, Pillow grabs the WHOLE virtual desktop and crops it
+    # (7680x2160 = ~66 MB a frame on a wide setup): ~5 real pictures a second.
+    FPS = 30 if _HAS_MSS else 12
 
     def __init__(self, app, bbox_virtual: tuple, win_offset: tuple,
                  autostart: bool = True):
@@ -909,7 +921,9 @@ class Recorder:
         # verify isOpened() before we pretend to be recording.
         self.writer = None
         self.err = None
-        for fourcc, ext in (("mp4v", ".mp4"), ("MJPG", ".avi"), ("XVID", ".avi")):
+        # v9.11.6: MJPG first: much faster to write than mp4v and keeps text sharp;
+        # what you save is re-encoded to H.264 by ffmpeg anyway.
+        for fourcc, ext in (("MJPG", ".avi"), ("mp4v", ".mp4"), ("XVID", ".avi")):
             path = os.path.splitext(self.tmp)[0] + ext
             w = cv2.VideoWriter(path, cv2.VideoWriter_fourcc(*fourcc),
                                 self.FPS, self.size)
@@ -1103,52 +1117,94 @@ class Recorder:
         return (pt.x - self.vx, pt.y - self.vy)
 
     def _loop(self):
+        """v9.11.6: two threads. This one GRABS at a steady 30 fps and hands frames
+        over; _write_loop ENCODES them. A slow write no longer delays the next grab.
+        Each frame carries how many times to write it, so the video always keeps
+        real time (and the sound stays in step) even when a grab is late."""
+        import queue
+        self.q = queue.Queue(maxsize=self.FPS)          # about 1 s of frames
+        self.wthread = self._threading.Thread(target=self._write_loop, daemon=True)
+        self.wthread.start()
         period = 1.0 / self.FPS
         nxt = time.time()
+        queued = 0                                       # frames promised to the writer
         # v6.1: self.bbox is in VIRTUAL-DESKTOP IMAGE coordinates (0-based).
-        # ImageGrab.grab(all_screens=True) wants SCREEN coordinates, whose origin
-        # is the virtual origin — and that is NEGATIVE when a monitor sits left of
-        # or above the primary. Passing image coords straight through grabbed a
-        # rectangle that was off-screen, so every frame came back BLACK.
-        # __init__ already receives the offset for exactly this translation; it
-        # simply was never applied here.
+        # Screen grabs want SCREEN coordinates, whose origin is the virtual origin,
+        # NEGATIVE when a monitor sits left of or above the primary.
         grab_box = (self.bbox[0] + self.vx, self.bbox[1] + self.vy,
                     self.bbox[2] + self.vx, self.bbox[3] + self.vy)
-        while not self.stop_flag.is_set():
+        sct = None
+        if _HAS_MSS:
             try:
-                img = ImageGrab.grab(bbox=grab_box, all_screens=True) \
-                    if IS_WINDOWS else ImageGrab.grab(bbox=grab_box)
-                frame = cv2.cvtColor(np.array(img), cv2.COLOR_RGB2BGR)
-                frame = frame[:self.size[1], :self.size[0]]
-                cur = self._cursor_pos()               # screen coords
-                if cur:
-                    cx = cur[0] - grab_box[0]
-                    cy = cur[1] - grab_box[1]
-                    if 0 <= cx < self.size[0] and 0 <= cy < self.size[1]:
-                        cv2.circle(frame, (cx, cy), 9, (0, 210, 255), 2)
-                        cv2.circle(frame, (cx, cy), 2, (0, 210, 255), -1)
-                if frame.shape[0] != self.size[1] or frame.shape[1] != self.size[0]:
-                    # v6: cv2 writes NOTHING if the frame size differs from the
-                    # writer's size — and says nothing about it. Force the match.
-                    frame = cv2.resize(frame, self.size)
-                if self.frames < 5 and not frame.any():   # v6.1: pure-black frame
-                    self.black += 1
-                # v9.11: write as many frames as real time asks for. A slow grab used to
-                # DROP frames, so the video ran shorter (and faster) than real time:
-                # harmless when silent, but the sound would drift out of step.
-                due = int((time.time() - self.t0) * self.FPS) + 1
-                for _ in range(max(1, due - self.frames)):
+                import mss                              # created in THIS thread (GDI handles)
+                sct = (getattr(mss, "MSS", None) or mss.mss)()   # mss 10+ renamed mss.mss
+            except Exception as e:
+                self.last_error = f"mss: {e}"
+        area = {"left": grab_box[0], "top": grab_box[1],
+                "width": self.size[0], "height": self.size[1]}
+        try:
+            while not self.stop_flag.is_set():
+                try:
+                    if sct is not None:
+                        shot = np.asarray(sct.grab(area))           # BGRA, just the area
+                        frame = np.ascontiguousarray(shot[:, :, :3])
+                    else:
+                        img = ImageGrab.grab(bbox=grab_box, all_screens=True) \
+                            if IS_WINDOWS else ImageGrab.grab(bbox=grab_box)
+                        frame = cv2.cvtColor(np.array(img), cv2.COLOR_RGB2BGR)
+                    frame = frame[:self.size[1], :self.size[0]]
+                    cur = self._cursor_pos()               # screen coords
+                    if cur:
+                        cx = cur[0] - grab_box[0]
+                        cy = cur[1] - grab_box[1]
+                        if 0 <= cx < self.size[0] and 0 <= cy < self.size[1]:
+                            cv2.circle(frame, (cx, cy), 9, (0, 210, 255), 2)
+                            cv2.circle(frame, (cx, cy), 2, (0, 210, 255), -1)
+                    if frame.shape[0] != self.size[1] or frame.shape[1] != self.size[0]:
+                        # v6: cv2 writes NOTHING if the frame size differs from the
+                        # writer's size, and says nothing about it. Force the match.
+                        frame = cv2.resize(frame, self.size)
+                    if queued < 5 and not frame.any():     # v6.1: pure-black frame
+                        self.black += 1
+                    # v9.11: as many frames as real time asks for (sound stays in step)
+                    due = int((time.time() - self.t0) * self.FPS) + 1
+                    n = max(1, due - queued)
+                    try:
+                        self.q.put((frame, n), timeout=0.5)
+                        queued += n
+                    except Exception:                      # writer far behind: skip this
+                        pass                               # grab; the next one repeats more
+                except Exception as e:                     # v6: was `pass`, silent death
+                    self.errors += 1
+                    self.last_error = f"{type(e).__name__}: {e}"
+                nxt += period
+                delay = nxt - time.time()
+                if delay > 0:
+                    time.sleep(delay)
+                else:
+                    nxt = time.time()          # fell behind; resync
+        finally:
+            self.q.put(None)                   # tell the writer we are done
+            if sct is not None:
+                try:
+                    sct.close()
+                except Exception:
+                    pass
+
+    def _write_loop(self):
+        """v9.11.6: encode frames from the grab thread (cv2 releases the GIL)."""
+        while True:
+            item = self.q.get()
+            if item is None:
+                return
+            frame, n = item
+            try:
+                for _ in range(n):
                     self.writer.write(frame)
                     self.frames += 1
-            except Exception as e:                 # v6: was `pass` — silent death
+            except Exception as e:
                 self.errors += 1
                 self.last_error = f"{type(e).__name__}: {e}"
-            nxt += period
-            delay = nxt - time.time()
-            if delay > 0:
-                time.sleep(delay)
-            else:
-                nxt = time.time()          # fell behind; resync
 
     def stop(self):
         if not self.running:                       # v7: armed but never started
@@ -1157,6 +1213,8 @@ class Recorder:
         self.stop_flag.set()
         if self.thread:
             self.thread.join(timeout=5)
+        if getattr(self, "wthread", None):            # v9.11.6: let the writer finish the queue
+            self.wthread.join(timeout=30)
         self.writer.release()
         if self.audio:                             # v9.11: sound, as long as the video
             self.wavs = self.audio.stop(self.t0, self.frames / self.FPS)

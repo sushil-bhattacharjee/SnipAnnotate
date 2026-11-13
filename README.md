@@ -1,4 +1,4 @@
-# SnipAnnotate — Installation Guide (v9.11.3)
+# SnipAnnotate — Installation Guide (v9.11.6)
 
 A single-file Windows screen-capture + annotation tool (`snipannotate.py`).
 No installer, no registry — one Python file plus a few pip packages.
@@ -16,6 +16,7 @@ Repo: https://github.com/sushil-bhattacharjee/SnipAnnotate.git
 | git | any | *optional* — only to clone/pull the repo |
 | Pillow | any current | screenshots, image handling — **required** |
 | opencv-python + numpy | any current | ⏺ screen recording — *optional* |
+| mss | any current | smooth 30 fps recording (v9.11.6); without it 12 fps — *optional* |
 | PyAudioWPatch + imageio-ffmpeg | any current | 🎤 / 🔊 sound in recordings (v9.11) — *optional* |
 | winrt (5 packages) | any current | 🔤 OCR (Windows built-in engine) — *optional* |
 
@@ -97,8 +98,8 @@ Everything below assumes the venv is active (prompt shows `(.venv)`).
 # required
 pip install pillow
 
-# optional: screen recording (MP4/AVI/GIF)
-pip install opencv-python numpy
+# optional: screen recording (MP4/AVI/GIF); mss makes it smooth (30 fps)
+pip install opencv-python numpy mss
 
 # optional: sound in recordings, your mic and/or PC sound (v9.11)
 pip install PyAudioWPatch imageio-ffmpeg
