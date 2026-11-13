@@ -39,7 +39,7 @@ except ImportError:          # recording is optional; snipping works without it
     cv2 = None
     np = None
 
-__version__ = "9.11"
+__version__ = "9.11.1"
 
 
 def _install_crash_log():
@@ -741,10 +741,14 @@ class AudioRecorder:
 
     def _run(self, source: str):
         try:
-            if IS_WINDOWS:                              # COM for THIS thread only: importing
-                import ctypes                           # soundcard in the Tk thread would turn
-                ctypes.windll.ole32.CoInitializeEx(None, 0)   # it MTA and upset file dialogs
+            # Import soundcard HERE, never in the Tk thread: its import calls
+            # CoInitializeEx(MTA), which would upset Tk's file dialogs. It must come
+            # BEFORE our own CoInitializeEx: soundcard treats "already initialised"
+            # (S_FALSE) as an error -> "RuntimeError: Error 0x100000001" (v9.11.1).
             import soundcard as sc
+            if IS_WINDOWS:                              # the 2nd thread (or a 2nd recording) did
+                import ctypes                           # not run soundcard's import: give it COM.
+                ctypes.windll.ole32.CoInitializeEx(None, 0)   # S_FALSE if it has it: fine
             if source == "mic":
                 dev = sc.default_microphone()
             else:                                       # "what you hear" from the default speaker
