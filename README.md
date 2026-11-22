@@ -1,4 +1,4 @@
-# SnipAnnotate — Installation Guide (v9.11.6)
+# SnipAnnotate — Installation Guide (v9.11.7)
 
 A single-file Windows screen-capture + annotation tool (`snipannotate.py`).
 No installer, no registry — one Python file plus a few pip packages.
@@ -84,13 +84,28 @@ python -m venv .venv                 # if python errors: py -m venv .venv
 Once the venv is **active** (prompt shows `(.venv)`), plain `python` and
 `pip` always work — the python/py ambiguity only exists outside a venv.
 
-If PowerShell refuses to run the activate script:
+If PowerShell refuses to run the activate script ("running scripts is disabled
+on this system"):
 
 ```powershell
 Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
 ```
 
-Everything below assumes the venv is active (prompt shows `(.venv)`).
+**Managed / work PC** (the policy is locked, or you'd rather not change it):
+skip activation altogether and call the venv's own interpreter by its path.
+It does exactly what the activated `python` / `pip` would:
+
+```powershell
+cd C:\Apps\SnipAnnotate
+.\.venv\Scripts\python.exe -m pip install pillow     # instead of: pip install ...
+.\.venv\Scripts\python.exe snipannotate.py           # instead of: python snipannotate.py
+```
+
+In every step below, read `pip install …` as `.\.venv\Scripts\python.exe -m pip install …`
+and `python` as `.\.venv\Scripts\python.exe`. The shortcuts in §7 already
+target `.venv\Scripts\pythonw.exe` directly, so they need no activation either.
+
+Everything below assumes the venv is active (prompt shows `(.venv)`), or that you use the full `.venv\Scripts\python.exe` path as above.
 
 ## 5. Install the packages
 
@@ -345,7 +360,7 @@ Notes:
 |---|---|
 | `python` opens the Microsoft Store / not found | use `py` instead (same args) — or reinstall from python.org with "Add to PATH" |
 | `python` works in one terminal, not another | PATH differs per shell — `py` works everywhere; inside an activated venv `python` always works |
-| Activate.ps1 blocked | `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned` |
+| Activate.ps1 blocked ("running scripts is disabled") | `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned` — or, on a managed/work PC, skip activation and use `.\.venv\Scripts\python.exe -m pip …` / `.\.venv\Scripts\python.exe snipannotate.py` (§4) |
 | Shortcut starts but app can't find pillow | shortcut targets system `pythonw.exe`, not the venv's — fix TargetPath (§7.1) |
 | Black console window at logon | shortcut targets `python.exe` — use `pythonw.exe` |
 | "Pillow is required" | `pip install pillow` (inside the venv) |
